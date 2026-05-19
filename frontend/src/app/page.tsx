@@ -16,8 +16,10 @@ import { useModalState } from '@/hooks/useModalState';
 import { useRecordingStateSync } from '@/hooks/useRecordingStateSync';
 import { useRecordingStart } from '@/hooks/useRecordingStart';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
+import { useCallEndDetection } from '@/hooks/useCallEndDetection';
 import { useTranscriptRecovery } from '@/hooks/useTranscriptRecovery';
 import { TranscriptRecovery } from '@/components/TranscriptRecovery';
+import { CallEndedDialog } from '@/components/CallEndedDialog';
 import { indexedDBService } from '@/services/indexedDBService';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
@@ -48,6 +50,14 @@ export default function Home() {
     setIsRecordingState,
     setIsRecordingDisabled
   );
+
+  // Call end detection - shows popup when meeting call ends during recording
+  const {
+    showCallEndedDialog,
+    lastDetectedApps,
+    handleStopFromCallEnd,
+    handleContinueFromCallEnd,
+  } = useCallEndDetection(() => handleRecordingStop(true));
 
   // Recovery hook
   const {
@@ -201,6 +211,14 @@ export default function Home() {
         modals={modals}
         messages={messages}
         onClose={hideModal}
+      />
+
+      {/* Call Ended Detection Dialog */}
+      <CallEndedDialog
+        isOpen={showCallEndedDialog}
+        onStopRecording={handleStopFromCallEnd}
+        onContinueRecording={handleContinueFromCallEnd}
+        lastDetectedApps={lastDetectedApps}
       />
 
       {/* Recovery Dialog */}

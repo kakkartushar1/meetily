@@ -1,9 +1,19 @@
 import { useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { type CustomModelCatalogEntry } from '../constants/modelCatalog';
 
 export interface RawModelInfo {
   name: string;
   size_mb: number;
+  status: 'Available' | 'Missing' | { Downloading: { progress: number } } | { Error: string };
+}
+
+export interface NemoRawModelInfo {
+  model_id: string;
+  filename: string;
+  size_mb: number;
+  label: string;
+  description: string;
   status: 'Available' | 'Missing' | { Downloading: { progress: number } } | { Error: string };
 }
 
@@ -12,6 +22,8 @@ export interface ModelOption {
   name: string;
   displayName: string;
   size_mb: number;
+  runtime?: 'localWhisper' | 'parakeet' | 'nemo';
+  isCustom?: boolean;
 }
 
 interface TranscriptModelConfig {
@@ -61,7 +73,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       console.error('Failed to fetch Whisper models:', err);
     }
 
-    // Fetch Parakeet models
+    // Fetch Parakeet ONNX models
     try {
       const parakeetModels = await invoke<RawModelInfo[]>('parakeet_get_available_models');
       const availableParakeet = parakeetModels
@@ -71,10 +83,47 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
           name: m.name,
           displayName: `⚡ Parakeet: ${m.name}`,
           size_mb: m.size_mb,
+          runtime: 'parakeet' as const,
         }));
       allModels.push(...availableParakeet);
     } catch (err) {
       console.error('Failed to fetch Parakeet models:', err);
+    }
+
+    // Fetch NeMo models
+    try {
+      const nemoModels = await invoke<NemoRawModelInfo[]>('nemo_get_available_models');
+      const availableNemo = nemoModels
+        .filter((m) => m.status === 'Available')
+        .map((m) => ({
+          provider: 'parakeet' as const, // Same provider in DB
+          name: m.model_id,
+          displayName: `🎯 NeMo: ${m.label}`,
+          size_mb: m.size_mb,
+          runtime: 'nemo' as const,
+        }));
+      allModels.push(...availableNemo);
+    } catch (err) {
+      // NeMo engine may not be initialized yet - that's OK
+      console.debug('NeMo models not available (expected if not initialized):', err);
+    }
+
+    // Fetch custom HuggingFace models
+    try {
+      const customModels = await invoke<CustomModelCatalogEntry[]>('parakeet_get_custom_models');
+      const readyCustom = customModels
+        .filter((m) => m.status === 'ready')
+        .map((m) => ({
+          provider: 'parakeet' as const,
+          name: m.modelId,
+          displayName: `🤗 Custom: ${m.label}`,
+          size_mb: m.sizeMb,
+          runtime: 'parakeet' as const,
+          isCustom: true,
+        }));
+      allModels.push(...readyCustom);
+    } catch (err) {
+      console.debug('Custom models not available:', err);
     }
 
     setAvailableModels(allModels);

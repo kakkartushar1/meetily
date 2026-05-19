@@ -1,0 +1,23 @@
+# NeMo ASR Sidecar Dependencies
+# NOTE: This is a heavy optional dependency set (~several GB).
+# Only installed when user opts in to .nemo model support.
+
+# NeMo ASR toolkit
+nemo_toolkit[asr]>=2.0.0
+
+# PyTorch (CPU fallback; user may install CUDA variant separately)
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# HuggingFace Hub for resumable model downloads
+huggingface_hub>=0.20.0
+
+# HTTP server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Audio I/O
+soundfile>=0.12.0
+
+# Utilities
+pydantic>=2.0.0

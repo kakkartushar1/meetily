@@ -40,6 +40,7 @@ pub mod api;
 pub mod audio;
 pub mod config;
 pub mod console_utils;
+pub mod model_catalog;
 pub mod database;
 pub mod notifications;
 pub mod ollama;
@@ -48,6 +49,7 @@ pub mod openai;
 pub mod anthropic;
 pub mod groq;
 pub mod openrouter;
+pub mod nemo_engine;
 pub mod parakeet_engine;
 pub mod state;
 pub mod summary;
@@ -555,6 +557,24 @@ pub fn run() {
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,
+            // Custom HuggingFace model commands
+            parakeet_engine::commands::parakeet_inspect_huggingface_model,
+            parakeet_engine::commands::parakeet_add_custom_model,
+            parakeet_engine::commands::parakeet_add_local_model,
+            parakeet_engine::commands::parakeet_remove_custom_model,
+            parakeet_engine::commands::parakeet_get_custom_models,
+            parakeet_engine::commands::parakeet_load_custom_model,
+            // NeMo engine commands
+            nemo_engine::commands::nemo_init,
+            nemo_engine::commands::nemo_get_available_models,
+            nemo_engine::commands::nemo_download_model,
+            nemo_engine::commands::nemo_cancel_download,
+            nemo_engine::commands::nemo_load_model,
+            nemo_engine::commands::nemo_transcribe_audio,
+            nemo_engine::commands::nemo_validate_model_ready,
+            nemo_engine::commands::nemo_unload_model,
+            nemo_engine::commands::nemo_delete_model,
+            nemo_engine::commands::open_nemo_models_folder,
             // Parallel processing commands
             whisper_engine::parallel_commands::initialize_parallel_processor,
             whisper_engine::parallel_commands::start_parallel_processing,
@@ -631,23 +651,23 @@ pub fn run() {
             api::api_get_custom_openai_config,
             api::api_test_custom_openai_connection,
             // Summary commands
-            summary::api_process_transcript,
-            summary::api_get_summary,
-            summary::api_save_meeting_summary,
-            summary::api_cancel_summary,
+            summary::commands::api_process_transcript,
+            summary::commands::api_get_summary,
+            summary::commands::api_save_meeting_summary,
+            summary::commands::api_cancel_summary,
             // Template commands
-            summary::api_list_templates,
-            summary::api_get_template_details,
-            summary::api_validate_template,
+            summary::template_commands::api_list_templates,
+            summary::template_commands::api_get_template_details,
+            summary::template_commands::api_validate_template,
             // Built-in AI commands
-            summary::summary_engine::builtin_ai_list_models,
-            summary::summary_engine::builtin_ai_get_model_info,
-            summary::summary_engine::builtin_ai_download_model,
-            summary::summary_engine::builtin_ai_cancel_download,
-            summary::summary_engine::builtin_ai_delete_model,
-            summary::summary_engine::builtin_ai_is_model_ready,
-            summary::summary_engine::builtin_ai_get_available_summary_model,
-            summary::summary_engine::builtin_ai_get_recommended_model,
+            summary::summary_engine::commands::builtin_ai_list_models,
+            summary::summary_engine::commands::builtin_ai_get_model_info,
+            summary::summary_engine::commands::builtin_ai_download_model,
+            summary::summary_engine::commands::builtin_ai_cancel_download,
+            summary::summary_engine::commands::builtin_ai_delete_model,
+            summary::summary_engine::commands::builtin_ai_is_model_ready,
+            summary::summary_engine::commands::builtin_ai_get_available_summary_model,
+            summary::summary_engine::commands::builtin_ai_get_recommended_model,
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,

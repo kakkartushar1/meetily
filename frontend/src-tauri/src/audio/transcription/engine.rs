@@ -15,6 +15,7 @@ use tauri::{AppHandle, Manager, Runtime};
 pub enum TranscriptionEngine {
     Whisper(Arc<crate::whisper_engine::WhisperEngine>),  // Direct access (backward compat)
     Parakeet(Arc<crate::parakeet_engine::ParakeetEngine>), // Direct access (backward compat)
+    Nemo(Arc<crate::nemo_engine::NemoEngine>),  // NeMo sidecar (new)
     Provider(Arc<dyn TranscriptionProvider>),  // Trait-based (preferred for new code)
 }
 
@@ -24,6 +25,7 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(engine) => engine.is_model_loaded().await,
             Self::Parakeet(engine) => engine.is_model_loaded().await,
+            Self::Nemo(engine) => engine.is_model_loaded().await,
             Self::Provider(provider) => provider.is_model_loaded().await,
         }
     }
@@ -33,6 +35,7 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(engine) => engine.get_current_model().await,
             Self::Parakeet(engine) => engine.get_current_model().await,
+            Self::Nemo(engine) => engine.get_current_model().await,
             Self::Provider(provider) => provider.get_current_model().await,
         }
     }
@@ -42,6 +45,7 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(_) => "Whisper (direct)",
             Self::Parakeet(_) => "Parakeet (direct)",
+            Self::Nemo(_) => "NeMo (sidecar)",
             Self::Provider(provider) => provider.provider_name(),
         }
     }
@@ -86,8 +90,25 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
         }
     };
 
-    // Validate based on provider
+    // Resolve runtime from model catalog to decide validation path
+    let runtime = crate::model_catalog::resolve_runtime(&config.provider, &config.model);
+
+    // Validate based on provider and runtime
     match config.provider.as_str() {
+        // NeMo models under the parakeet provider use a different validation path
+        "parakeet" if matches!(runtime, Some(crate::model_catalog::ModelRuntime::Nemo)) => {
+            info!("🔍 Validating NeMo model...");
+            match crate::nemo_engine::commands::nemo_validate_model_ready_with_config(app).await {
+                Ok(model_name) => {
+                    info!("✅ NeMo model validation successful: {} is ready", model_name);
+                    Ok(())
+                }
+                Err(e) => {
+                    warn!("❌ NeMo model validation failed: {}", e);
+                    Err(e)
+                }
+            }
+        }
         "localWhisper" => {
             info!("🔍 Validating Whisper model...");
             // Ensure whisper engine is initialized first
@@ -182,10 +203,47 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
         }
     };
 
-    // Initialize the appropriate engine based on provider
+    // Resolve runtime from model catalog
+    let runtime = crate::model_catalog::resolve_runtime(&config.provider, &config.model);
+
+    // Initialize the appropriate engine based on provider and runtime
     match config.provider.as_str() {
+        // NeMo models under the parakeet provider
+        "parakeet" if matches!(runtime, Some(crate::model_catalog::ModelRuntime::Nemo)) => {
+            info!("🧠 Initializing NeMo transcription engine");
+
+            let engine = {
+                let guard = crate::nemo_engine::commands::NEMO_ENGINE
+                    .lock()
+                    .unwrap();
+                guard.as_ref().cloned()
+            };
+
+            match engine {
+                Some(engine) => {
+                    if engine.is_model_loaded().await {
+                        let model_name = engine.get_current_model().await
+                            .unwrap_or_else(|| "unknown".to_string());
+                        info!("✅ NeMo model '{}' already loaded", model_name);
+                        Ok(TranscriptionEngine::Nemo(engine))
+                    } else {
+                        Err("NeMo engine initialized but no model loaded. This should not happen after validation.".to_string())
+                    }
+                }
+                None => {
+                    Err("NeMo engine not initialized. This should not happen after validation.".to_string())
+                }
+            }
+        }
+        // ONNX Parakeet models (including custom models)
         "parakeet" => {
-            info!("🦜 Initializing Parakeet transcription engine");
+            // Check if this is a custom model
+            let is_custom = crate::model_catalog::is_custom_model(&config.model);
+            if is_custom {
+                info!("🦜 Initializing Parakeet engine with custom model: {}", config.model);
+            } else {
+                info!("🦜 Initializing Parakeet transcription engine");
+            }
 
             // Get Parakeet engine
             let engine = {

@@ -72,8 +72,8 @@ posthog-rs = "0.3.7"
 # Cross-platform audio capture
 cpal = "0.15.3"
 
-# Wav encoding - now using manual WAV creation instead of hound
-# hound = "3.5"
+# Wav encoding - used by NeMo engine for temp WAV file creation
+hound = "3.5"
 
 # Cli ! shouldn't be required if using as lib
 clap = { version = "4.3", features = ["derive"] }
@@ -179,7 +179,7 @@ whisper-rs = { version = "0.13.2", features = ["raw-api", "metal", "coreml"] }
 #   --features vulkan   (AMD/Intel GPUs)
 #   --features openblas (OpenBLAS optimization, requires BLAS_INCLUDE_DIRS)
 [target.'cfg(target_os = "windows")'.dependencies]
-whisper-rs = { version = "0.13.2", features = ["raw-api", "vulkan"] }
+whisper-rs = { version = "0.13.2", features = ["raw-api"] }
 futures-channel = "0.3.31"
 
 # Linux-specific dependencies
