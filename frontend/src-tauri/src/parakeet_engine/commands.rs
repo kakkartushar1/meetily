@@ -1,4 +1,10 @@
 use crate::parakeet_engine::{ModelInfo, ModelStatus, ParakeetEngine, DownloadProgress};
+use crate::parakeet_engine::huggingface_api;
+use crate::model_catalog::{
+    CustomModelCatalogEntry, CustomModelStatus, ModelFormat,
+    detect_model_format, register_custom_model, unregister_custom_model,
+    update_custom_model_status, get_custom_models, lookup_custom_model,
+};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::Arc;
@@ -596,4 +602,308 @@ pub async fn open_parakeet_models_folder() -> Result<(), String> {
 
     log::info!("Opened Parakeet models folder: {}", folder_path);
     Ok(())
+}
+
+// ============================================================================
+// CUSTOM HUGGINGFACE MODEL COMMANDS
+// ============================================================================
+
+/// Inspect a HuggingFace model repository to get metadata, format, and size.
+#[command]
+pub async fn parakeet_inspect_huggingface_model(
+    repo_id: String,
+) -> Result<serde_json::Value, String> {
+    log::info!("Inspecting HuggingFace model: {}", repo_id);
+
+    let result = huggingface_api::inspect_model(&repo_id)
+        .await
+        .map_err(|e| format!("Failed to inspect model '{}': {}", repo_id, e))?;
+
+    serde_json::to_value(&result)
+        .map_err(|e| format!("Failed to serialize inspection result: {}", e))
+}
+
+/// Add a custom model from HuggingFace by repo ID.
+/// This registers the model in the catalog and starts the download.
+#[command]
+pub async fn parakeet_add_custom_model<R: Runtime>(
+    app_handle: AppHandle<R>,
+    repo_id: String,
+    label: Option<String>,
+) -> Result<serde_json::Value, String> {
+    log::info!("Adding custom HuggingFace model: {}", repo_id);
+
+    // Step 1: Inspect the model to get metadata
+    let inspection = huggingface_api::inspect_model(&repo_id)
+        .await
+        .map_err(|e| format!("Failed to inspect model '{}': {}", repo_id, e))?;
+
+    // Step 2: Validate it's a compatible model
+    if inspection.format == ModelFormat::Unknown {
+        return Err(format!(
+            "Model '{}' has no recognized model files (ONNX, Safetensors, MLX, or NeMo). \
+             Found files: {:?}",
+            repo_id,
+            inspection.model_files
+        ));
+    }
+
+    // Step 3: Create and register the custom model entry
+    let entry = CustomModelCatalogEntry::from_huggingface(
+        &repo_id,
+        inspection.format,
+        inspection.model_files.clone(),
+        inspection.total_size_mb,
+        label,
+        None,
+    );
+
+    let model_id = entry.model_id.clone();
+    register_custom_model(entry.clone())
+        .map_err(|e| format!("Failed to register custom model: {}", e))?;
+
+    // Step 4: Start download in background
+    let models_dir = get_models_directory()
+        .ok_or_else(|| "Models directory not initialized".to_string())?
+        .join("parakeet")
+        .join("custom")
+        .join(repo_id.replace('/', "_"));
+
+    let app_clone = app_handle.clone();
+    let model_id_clone = model_id.clone();
+    let files_to_download = inspection.model_files.clone();
+    let repo_id_clone = repo_id.clone();
+
+    tokio::spawn(async move {
+        // Update status to downloading
+        let _ = update_custom_model_status(&model_id_clone, CustomModelStatus::Downloading { progress: 0 });
+
+        let progress_callback: Box<dyn Fn(huggingface_api::HfDownloadProgress) + Send + Sync> = {
+            let app = app_clone.clone();
+            let mid = model_id_clone.clone();
+            Box::new(move |progress: huggingface_api::HfDownloadProgress| {
+                // Update registry status
+                let _ = update_custom_model_status(
+                    &mid,
+                    CustomModelStatus::Downloading { progress: progress.overall_percent },
+                );
+
+                // Emit progress event to frontend
+                let _ = app.emit(
+                    "custom-model-download-progress",
+                    serde_json::json!({
+                        "modelId": mid,
+                        "currentFile": progress.current_file,
+                        "fileIndex": progress.file_index,
+                        "totalFiles": progress.total_files,
+                        "downloadedBytes": progress.downloaded_bytes,
+                        "totalBytes": progress.total_bytes,
+                        "overallPercent": progress.overall_percent,
+                        "speedMbps": progress.speed_mbps,
+                    }),
+                );
+            })
+        };
+
+        match huggingface_api::download_model_files(
+            &repo_id_clone,
+            &files_to_download,
+            &models_dir,
+            Some(progress_callback),
+        ).await {
+            Ok(_) => {
+                log::info!("Custom model '{}' downloaded successfully", model_id_clone);
+                let _ = update_custom_model_status(&model_id_clone, CustomModelStatus::Ready);
+
+                let _ = app_clone.emit(
+                    "custom-model-download-complete",
+                    serde_json::json!({
+                        "modelId": model_id_clone,
+                    }),
+                );
+            }
+            Err(e) => {
+                log::error!("Failed to download custom model '{}': {}", model_id_clone, e);
+                let _ = update_custom_model_status(
+                    &model_id_clone,
+                    CustomModelStatus::Error(e.to_string()),
+                );
+
+                let _ = app_clone.emit(
+                    "custom-model-download-error",
+                    serde_json::json!({
+                        "modelId": model_id_clone,
+                        "error": e.to_string(),
+                    }),
+                );
+            }
+        }
+    });
+
+    // Return the registered model info
+    serde_json::to_value(&serde_json::json!({
+        "modelId": model_id,
+        "format": format!("{}", inspection.format),
+        "sizeMb": inspection.total_size_mb,
+        "files": inspection.model_files,
+        "isSttModel": inspection.is_stt_model,
+        "status": "downloading",
+    }))
+    .map_err(|e| format!("Failed to serialize response: {}", e))
+}
+
+/// Add a custom model from a local directory path.
+#[command]
+pub async fn parakeet_add_local_model(
+    path: String,
+    label: Option<String>,
+) -> Result<serde_json::Value, String> {
+    log::info!("Adding local model from path: {}", path);
+
+    let model_path = PathBuf::from(&path);
+
+    // Validate the local path
+    let files = huggingface_api::validate_local_model_path(&model_path)
+        .await
+        .map_err(|e| format!("Invalid model path: {}", e))?;
+
+    let format = detect_model_format(&files);
+    if format == ModelFormat::Unknown {
+        return Err(format!(
+            "No recognized model files found at '{}'. Expected ONNX, Safetensors, MLX, or NeMo files.",
+            path
+        ));
+    }
+
+    // Calculate total size
+    let total_size: u64 = files.iter().filter_map(|f| {
+        std::fs::metadata(model_path.join(f)).ok().map(|m| m.len())
+    }).sum();
+    let size_mb = (total_size / (1024 * 1024)) as u32;
+
+    let entry = CustomModelCatalogEntry::from_local_path(
+        model_path,
+        format,
+        files.clone(),
+        size_mb,
+        label,
+    );
+
+    // Local models are immediately ready (no download needed)
+    let model_id = entry.model_id.clone();
+    let mut entry = entry;
+    entry.status = CustomModelStatus::Ready;
+
+    register_custom_model(entry)
+        .map_err(|e| format!("Failed to register local model: {}", e))?;
+
+    Ok(serde_json::json!({
+        "modelId": model_id,
+        "format": format!("{}", format),
+        "sizeMb": size_mb,
+        "files": files,
+        "status": "ready",
+    }))
+}
+
+/// Remove a custom model from the registry.
+#[command]
+pub async fn parakeet_remove_custom_model(
+    model_id: String,
+) -> Result<String, String> {
+    log::info!("Removing custom model: {}", model_id);
+
+    let entry = unregister_custom_model(&model_id)
+        .map_err(|e| format!("Failed to remove custom model: {}", e))?;
+
+    // If it was a HuggingFace model, clean up downloaded files
+    if entry.repo.is_some() {
+        let models_dir = get_models_directory()
+            .ok_or_else(|| "Models directory not initialized".to_string())?
+            .join("parakeet")
+            .join("custom")
+            .join(entry.repo.as_ref().unwrap().replace('/', "_"));
+
+        if models_dir.exists() {
+            if let Err(e) = tokio::fs::remove_dir_all(&models_dir).await {
+                log::warn!("Failed to clean up model files at {}: {}", models_dir.display(), e);
+            } else {
+                log::info!("Cleaned up model files at {}", models_dir.display());
+            }
+        }
+    }
+
+    Ok(format!("Custom model '{}' removed successfully", model_id))
+}
+
+/// Get all registered custom models.
+#[command]
+pub async fn parakeet_get_custom_models() -> Result<serde_json::Value, String> {
+    let models = get_custom_models();
+    serde_json::to_value(&models)
+        .map_err(|e| format!("Failed to serialize custom models: {}", e))
+}
+
+/// Load a custom model for transcription.
+#[command]
+pub async fn parakeet_load_custom_model(
+    model_id: String,
+) -> Result<(), String> {
+    log::info!("Loading custom model: {}", model_id);
+
+    let custom = lookup_custom_model(&model_id)
+        .ok_or_else(|| format!("Custom model '{}' not found", model_id))?;
+
+    if custom.status != CustomModelStatus::Ready {
+        return Err(format!(
+            "Custom model '{}' is not ready (status: {:?})",
+            model_id, custom.status
+        ));
+    }
+
+    // Only ONNX models can be loaded directly with the Parakeet engine
+    if custom.format != ModelFormat::Onnx {
+        return Err(format!(
+            "Custom model '{}' has format '{}' which requires conversion to ONNX before loading. \
+             Please convert the model first.",
+            model_id, custom.format
+        ));
+    }
+
+    // Determine the model directory
+    let model_dir = if let Some(local_path) = &custom.local_path {
+        local_path.clone()
+    } else if let Some(repo) = &custom.repo {
+        get_models_directory()
+            .ok_or_else(|| "Models directory not initialized".to_string())?
+            .join("parakeet")
+            .join("custom")
+            .join(repo.replace('/', "_"))
+    } else {
+        return Err("Custom model has no path or repo configured".to_string());
+    };
+
+    if !model_dir.exists() {
+        return Err(format!("Model directory not found: {}", model_dir.display()));
+    }
+
+    let engine = {
+        let guard = PARAKEET_ENGINE.lock().unwrap();
+        guard.as_ref().cloned()
+    };
+
+    if let Some(engine) = engine {
+        // Check if the custom model has int8 quantization files
+        let has_int8 = model_dir.join("encoder-model.int8.onnx").exists();
+
+        // Use the public load_custom_model method
+        engine.load_custom_model(&model_id, &model_dir, has_int8)
+            .await
+            .map_err(|e| format!("Failed to load custom model: {}", e))?;
+
+        log::info!("Custom model '{}' loaded successfully", model_id);
+        Ok(())
+    } else {
+        Err("Parakeet engine not initialized".to_string())
+    }
 }

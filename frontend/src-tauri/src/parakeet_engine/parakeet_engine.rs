@@ -1085,4 +1085,30 @@ impl ParakeetEngine {
 
         Ok(())
     }
+
+    /// Load a custom model from an arbitrary directory path.
+    ///
+    /// This is used for user-added HuggingFace models that are stored
+    /// outside the standard models directory.
+    pub async fn load_custom_model(&self, model_id: &str, model_dir: &std::path::Path, quantized: bool) -> Result<()> {
+        log::info!("Loading custom model '{}' from: {}", model_id, model_dir.display());
+
+        // Unload current model first
+        self.unload_model().await;
+
+        // Load the model
+        let model = ParakeetModel::new(model_dir, quantized)
+            .map_err(|e| anyhow!("Failed to load custom model '{}': {}", model_id, e))?;
+
+        // Update current model and model name
+        *self.current_model.write().await = Some(model);
+        *self.current_model_name.write().await = Some(model_id.to_string());
+
+        log::info!(
+            "Successfully loaded custom model: {} ({})",
+            model_id,
+            if quantized { "Int8 quantized" } else { "FP32" }
+        );
+        Ok(())
+    }
 }

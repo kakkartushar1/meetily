@@ -56,6 +56,12 @@ export const MODEL_DISPLAY_CONFIG: Record<string, ModelDisplayInfo> = {
     icon: '🎯',
     tagline: '20x real-time • Higher accuracy',
     tier: 'precise'
+  },
+  'nvidia/parakeet-rnnt-1.1b': {
+    friendlyName: 'RNNT 1.1B',
+    icon: '🎯',
+    tagline: 'High-accuracy English ASR • Opt-in ~4.3 GB download',
+    tier: 'precise'
   }
 };
 
@@ -83,6 +89,13 @@ export const PARAKEET_MODEL_CONFIGS: Record<string, Partial<ParakeetModelInfo>> 
     accuracy: 'High',
     speed: 'Fast',
     quantization: 'FP32'
+  },
+  'nvidia/parakeet-rnnt-1.1b': {
+    description: 'High-accuracy English ASR, opt-in download (~4.3 GB)',
+    size_mb: 4280,
+    accuracy: 'High',
+    speed: 'Medium',
+    quantization: 'FP32' // NeMo native format
   }
 };
 
@@ -203,4 +216,72 @@ export class ParakeetAPI {
   static async openModelsFolder(): Promise<void> {
     await invoke('open_parakeet_models_folder');
   }
+}
+
+// ============================================================================
+// NeMo API - Tauri command wrappers for NeMo backend
+// ============================================================================
+
+/** NeMo model info returned from the Rust backend. */
+export interface NemoModelInfo {
+  model_id: string;
+  filename: string;
+  size_mb: number;
+  label: string;
+  description: string;
+  status: NemoModelStatus;
+}
+
+export type NemoModelStatus =
+  | 'Available'
+  | 'Missing'
+  | { Downloading: { progress: number } }
+  | { Error: string };
+
+export class NemoAPI {
+  static async init(app?: unknown): Promise<void> {
+    await invoke('nemo_init');
+  }
+
+  static async getAvailableModels(): Promise<NemoModelInfo[]> {
+    return await invoke('nemo_get_available_models');
+  }
+
+  static async downloadModel(modelId: string): Promise<void> {
+    await invoke('nemo_download_model', { modelId });
+  }
+
+  static async cancelDownload(modelId: string): Promise<void> {
+    await invoke('nemo_cancel_download', { modelId });
+  }
+
+  static async loadModel(modelId: string): Promise<void> {
+    await invoke('nemo_load_model', { modelId });
+  }
+
+  static async transcribeAudio(audioData: number[]): Promise<string> {
+    return await invoke('nemo_transcribe_audio', { audioData });
+  }
+
+  static async validateModelReady(modelId: string): Promise<string> {
+    return await invoke('nemo_validate_model_ready', { modelId });
+  }
+
+  static async unloadModel(): Promise<void> {
+    await invoke('nemo_unload_model');
+  }
+
+  static async deleteModel(modelId: string): Promise<string> {
+    return await invoke('nemo_delete_model', { modelId });
+  }
+
+  static async openModelsFolder(): Promise<void> {
+    await invoke('open_nemo_models_folder');
+  }
+}
+
+/** Check if a model name refers to a NeMo runtime model. */
+export function isNemoModel(modelName: string): boolean {
+  // NeMo models use HF repo-style IDs with a slash
+  return modelName.includes('/');
 }
