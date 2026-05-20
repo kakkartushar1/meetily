@@ -75,6 +75,7 @@ pub struct ModelInfo {
     pub path: PathBuf,
     pub size_mb: u32,
     pub quantization: QuantizationType,
+    pub runtime: String,
     pub speed: String,     // Performance description
     pub status: ModelStatus,
     pub description: String,
@@ -168,18 +169,17 @@ impl ParakeetEngine {
         let models_dir = &self.models_dir;
         let mut models = Vec::new();
 
-        // Parakeet model configurations
-        // Model name format: parakeet-tdt-0.6b-v{version}-{quantization}
-        // Sizes match actual download sizes (encoder + decoder + preprocessor + vocab)
-        let model_configs = [
-            ("parakeet-tdt-0.6b-v3-int8", 670, QuantizationType::Int8, "Ultra Fast (v3)", "Real time on M4 Max, latest version with int8 quantization"),
-            ("parakeet-tdt-0.6b-v2-int8", 661, QuantizationType::Int8, "Fast (v2)", "Previous version with int8 quantization, good balance of speed and accuracy"),
-        ];
-
         // Get active downloads to override status
         let active_downloads = self.active_downloads.read().await;
 
-        for (name, size_mb, quantization, speed, description) in model_configs {
+        for entry in crate::transcription_catalog::parakeet_onnx_models() {
+            let name = entry.model_id;
+            let size_mb = entry.size_mb;
+            let quantization = if name.contains("int8") {
+                QuantizationType::Int8
+            } else {
+                QuantizationType::FP32
+            };
             let model_path = models_dir.join(name);
 
             // Check if model is currently downloading
@@ -238,11 +238,12 @@ impl ParakeetEngine {
             let model_info = ModelInfo {
                 name: name.to_string(),
                 path: model_path,
-                size_mb: size_mb as u32,
+                size_mb,
                 quantization: quantization.clone(),
-                speed: speed.to_string(),
+                runtime: "onnx".to_string(),
+                speed: entry.speed.to_string(),
                 status,
-                description: description.to_string(),
+                description: entry.description.to_string(),
             };
 
             models.push(model_info);

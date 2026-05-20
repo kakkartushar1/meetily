@@ -95,7 +95,8 @@
             "icons/app_icon.ico"
         ],
         "resources": [
-            "templates/*.json"
+            "templates/*.json",
+            "sidecars/nemo_asr/*"
         ],
         "externalBin": [
             "binaries/llama-helper",

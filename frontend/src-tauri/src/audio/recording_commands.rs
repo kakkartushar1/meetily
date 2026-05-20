@@ -627,7 +627,7 @@ pub async fn stop_recording<R: Runtime>(
     )
     .await
     {
-        Ok(Ok(Some(config))) => Some(config.provider),
+        Ok(Ok(Some(config))) => Some((config.provider, config.model)),
         Ok(Ok(None)) => None,
         Ok(Err(e)) => {
             warn!("⚠️ Failed to get transcript config: {:?}", e);
@@ -639,30 +639,56 @@ pub async fn stop_recording<R: Runtime>(
         }
     };
 
-    match config.as_deref() {
-        Some("parakeet") => {
-            info!("🦜 Unloading Parakeet model...");
-            let engine_clone = {
-                let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
-                    .lock()
-                    .unwrap();
-                engine_guard.as_ref().cloned()
-            };
+    match config.as_ref().map(|(provider, model)| (provider.as_str(), model.as_str())) {
+        Some(("parakeet", model)) => {
+            if crate::transcription_catalog::is_nemo_model(model) {
+                info!("Unloading NeMo Parakeet model...");
+                let engine_clone = {
+                    let engine_guard = crate::nemo_engine::commands::NEMO_ENGINE
+                        .lock()
+                        .unwrap();
+                    engine_guard.as_ref().cloned()
+                };
 
-            if let Some(engine) = engine_clone {
-                let current_model = engine
-                    .get_current_model()
-                    .await
-                    .unwrap_or_else(|| "unknown".to_string());
-                info!("Current Parakeet model before unload: '{}'", current_model);
+                if let Some(engine) = engine_clone {
+                    let current_model = engine
+                        .get_current_model()
+                        .await
+                        .unwrap_or_else(|| "unknown".to_string());
+                    info!("Current NeMo model before unload: '{}'", current_model);
 
-                if engine.unload_model().await {
-                    info!("✅ Parakeet model '{}' unloaded successfully", current_model);
+                    if engine.unload_model().await {
+                        info!("NeMo model '{}' unloaded successfully", current_model);
+                    } else {
+                        warn!("Failed to unload NeMo model '{}'", current_model);
+                    }
                 } else {
-                    warn!("⚠️ Failed to unload Parakeet model '{}'", current_model);
+                    warn!("No NeMo engine found to unload model");
                 }
             } else {
-                warn!("⚠️ No Parakeet engine found to unload model");
+                info!("🦜 Unloading Parakeet model...");
+                let engine_clone = {
+                    let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
+                        .lock()
+                        .unwrap();
+                    engine_guard.as_ref().cloned()
+                };
+
+                if let Some(engine) = engine_clone {
+                    let current_model = engine
+                        .get_current_model()
+                        .await
+                        .unwrap_or_else(|| "unknown".to_string());
+                    info!("Current Parakeet model before unload: '{}'", current_model);
+
+                    if engine.unload_model().await {
+                        info!("✅ Parakeet model '{}' unloaded successfully", current_model);
+                    } else {
+                        warn!("⚠️ Failed to unload Parakeet model '{}'", current_model);
+                    }
+                } else {
+                    warn!("⚠️ No Parakeet engine found to unload model");
+                }
             }
         }
         _ => {

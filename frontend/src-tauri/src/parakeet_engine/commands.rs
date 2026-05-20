@@ -1,4 +1,5 @@
-use crate::parakeet_engine::{ModelInfo, ModelStatus, ParakeetEngine, DownloadProgress};
+use crate::parakeet_engine::{DownloadProgress, ModelInfo, ModelStatus, ParakeetEngine};
+use crate::transcription_catalog;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::Arc;
@@ -58,14 +59,25 @@ pub async fn parakeet_get_available_models() -> Result<Vec<ModelInfo>, String> {
         guard.as_ref().cloned()
     };
 
-    if let Some(engine) = engine {
+    let mut models = if let Some(engine) = engine {
         engine
             .discover_models()
             .await
             .map_err(|e| format!("Failed to discover Parakeet models: {}", e))
     } else {
         Err("Parakeet engine not initialized".to_string())
+    }?;
+
+    if let Err(e) = crate::nemo_engine::commands::nemo_init().await {
+        log::warn!("Failed to initialize NeMo engine while listing Parakeet models: {}", e);
+    } else {
+        match crate::nemo_engine::commands::nemo_get_available_models().await {
+            Ok(mut nemo_models) => models.append(&mut nemo_models),
+            Err(e) => log::warn!("Failed to discover NeMo Parakeet models: {}", e),
+        }
     }
+
+    Ok(models)
 }
 
 #[command]
@@ -73,6 +85,37 @@ pub async fn parakeet_load_model<R: Runtime>(
     app_handle: AppHandle<R>,
     model_name: String
 ) -> Result<(), String> {
+    if transcription_catalog::is_nemo_model(&model_name) {
+        let _ = app_handle.emit(
+            "parakeet-model-loading-started",
+            serde_json::json!({ "modelName": model_name.clone() }),
+        );
+
+        let result = crate::nemo_engine::commands::nemo_validate_model_ready_internal(
+            &app_handle,
+            Some(model_name.clone()),
+        )
+        .await
+        .map(|_| ());
+
+        if result.is_ok() {
+            let _ = app_handle.emit(
+                "parakeet-model-loading-completed",
+                serde_json::json!({ "modelName": model_name }),
+            );
+        } else if let Err(ref error) = result {
+            let _ = app_handle.emit(
+                "parakeet-model-loading-failed",
+                serde_json::json!({
+                    "modelName": model_name,
+                    "error": error
+                }),
+            );
+        }
+
+        return result;
+    }
+
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -124,6 +167,10 @@ pub async fn parakeet_load_model<R: Runtime>(
 
 #[command]
 pub async fn parakeet_get_current_model() -> Result<Option<String>, String> {
+    if let Ok(Some(model)) = crate::nemo_engine::commands::nemo_get_current_model().await {
+        return Ok(Some(model));
+    }
+
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -138,6 +185,10 @@ pub async fn parakeet_get_current_model() -> Result<Option<String>, String> {
 
 #[command]
 pub async fn parakeet_is_model_loaded() -> Result<bool, String> {
+    if crate::nemo_engine::commands::nemo_is_model_loaded().await.unwrap_or(false) {
+        return Ok(true);
+    }
+
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -152,27 +203,11 @@ pub async fn parakeet_is_model_loaded() -> Result<bool, String> {
 
 #[command]
 pub async fn parakeet_has_available_models() -> Result<bool, String> {
-    let engine = {
-        let guard = PARAKEET_ENGINE.lock().unwrap();
-        guard.as_ref().cloned()
-    };
+    let models = parakeet_get_available_models().await?;
 
-    if let Some(engine) = engine {
-        let models = engine
-            .discover_models()
-            .await
-            .map_err(|e| format!("Failed to discover Parakeet models: {}", e))?;
-
-        // Check if at least one model is available
-        let available_models: Vec<_> = models
-            .iter()
-            .filter(|model| matches!(model.status, crate::parakeet_engine::ModelStatus::Available))
-            .collect();
-
-        Ok(!available_models.is_empty())
-    } else {
-        Ok(false)
-    }
+    Ok(models
+        .iter()
+        .any(|model| matches!(model.status, crate::parakeet_engine::ModelStatus::Available)))
 }
 
 #[command]
@@ -190,7 +225,7 @@ pub async fn parakeet_validate_model_ready() -> Result<String, String> {
             }
         }
 
-        // No model loaded, check if any models are available to load
+        // No model loaded, check if any ONNX models are available to load.
         let models = engine
             .discover_models()
             .await
@@ -260,6 +295,13 @@ pub async fn parakeet_validate_model_ready_with_config<R: tauri::Runtime>(
                 );
                 if config.provider == "parakeet" && !config.model.is_empty() {
                     log::info!("Using user's configured Parakeet model: {}", config.model);
+                    if transcription_catalog::is_nemo_model(&config.model) {
+                        return crate::nemo_engine::commands::nemo_validate_model_ready_internal(
+                            app,
+                            Some(config.model),
+                        )
+                        .await;
+                    }
                     Some(config.model)
                 } else {
                     log::info!(
@@ -345,6 +387,10 @@ pub async fn parakeet_validate_model_ready_with_config<R: tauri::Runtime>(
 
 #[command]
 pub async fn parakeet_transcribe_audio(audio_data: Vec<f32>) -> Result<String, String> {
+    if crate::nemo_engine::commands::nemo_is_model_loaded().await.unwrap_or(false) {
+        return crate::nemo_engine::commands::nemo_transcribe_audio(audio_data).await;
+    }
+
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -380,6 +426,15 @@ pub async fn parakeet_download_model<R: Runtime>(
     app_handle: AppHandle<R>,
     model_name: String,
 ) -> Result<(), String> {
+    if transcription_catalog::is_nemo_model(&model_name) {
+        return crate::nemo_engine::commands::nemo_download_model_with_event_prefix(
+            app_handle,
+            model_name,
+            "parakeet-model",
+        )
+        .await;
+    }
+
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -468,6 +523,19 @@ pub async fn parakeet_cancel_download<R: Runtime>(
     app_handle: AppHandle<R>,
     model_name: String,
 ) -> Result<(), String> {
+    if transcription_catalog::is_nemo_model(&model_name) {
+        crate::nemo_engine::commands::nemo_cancel_download(model_name.clone()).await?;
+        let _ = app_handle.emit(
+            "parakeet-model-download-progress",
+            serde_json::json!({
+                "modelName": model_name,
+                "progress": 0,
+                "status": "cancelled"
+            }),
+        );
+        return Ok(());
+    }
+
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()
@@ -502,6 +570,10 @@ pub async fn parakeet_retry_download<R: Runtime>(
     model_name: String,
 ) -> Result<(), String> {
     log::info!("Retrying download for: {}", model_name);
+
+    if transcription_catalog::is_nemo_model(&model_name) {
+        return parakeet_download_model(app_handle, model_name).await;
+    }
 
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
@@ -540,6 +612,10 @@ pub async fn parakeet_retry_download<R: Runtime>(
 
 #[command]
 pub async fn parakeet_delete_corrupted_model(model_name: String) -> Result<String, String> {
+    if transcription_catalog::is_nemo_model(&model_name) {
+        return crate::nemo_engine::commands::nemo_delete_model(model_name).await;
+    }
+
     let engine = {
         let guard = PARAKEET_ENGINE.lock().unwrap();
         guard.as_ref().cloned()

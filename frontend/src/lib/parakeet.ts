@@ -8,9 +8,13 @@ export interface ParakeetModelInfo {
   status: ModelStatus;
   description?: string;
   quantization: QuantizationType;
+  runtime?: ParakeetRuntime;
+  repo_id?: string;
+  filename?: string;
 }
 
 export type QuantizationType = 'FP32' | 'Int8';
+export type ParakeetRuntime = 'onnx' | 'nemo';
 export type ModelAccuracy = 'High' | 'Good' | 'Decent';
 export type ProcessingSpeed = 'Slow' | 'Medium' | 'Fast' | 'Very Fast' | 'Ultra Fast';
 
@@ -56,6 +60,12 @@ export const MODEL_DISPLAY_CONFIG: Record<string, ModelDisplayInfo> = {
     icon: '🎯',
     tagline: '20x real-time • Higher accuracy',
     tier: 'precise'
+  },
+  'nvidia/parakeet-rnnt-1.1b': {
+    friendlyName: 'RNNT 1.1B',
+    icon: '🧠',
+    tagline: 'High accuracy • NeMo .nemo model',
+    tier: 'precise'
   }
 };
 
@@ -68,21 +78,34 @@ export const PARAKEET_MODEL_CONFIGS: Record<string, Partial<ParakeetModelInfo>> 
     size_mb: 670, // Actual download: 652MB encoder + 18.2MB decoder + 0.2MB extras
     accuracy: 'High',
     speed: 'Ultra Fast',
-    quantization: 'Int8'
+    quantization: 'Int8',
+    runtime: 'onnx'
   },
   'parakeet-tdt-0.6b-v2-int8': {
     description: '25x real-time, smaller size with good accuracy',
     size_mb: 661, // Actual download: 652MB encoder + 9MB decoder + 0.15MB extras
     accuracy: 'High',
     speed: 'Very Fast',
-    quantization: 'Int8'
+    quantization: 'Int8',
+    runtime: 'onnx'
   },
   'parakeet-tdt-0.6b-v3-fp32': {
     description: '20x real-time on M4 Max, higher precision',
     size_mb: 2554, // Actual download: 2.44GB + 41.8MB encoder + 72.5MB decoder + 0.2MB extras
     accuracy: 'High',
     speed: 'Fast',
-    quantization: 'FP32'
+    quantization: 'FP32',
+    runtime: 'onnx'
+  },
+  'nvidia/parakeet-rnnt-1.1b': {
+    description: 'NVIDIA NeMo RNNT checkpoint for high-accuracy English transcription',
+    size_mb: 4280,
+    accuracy: 'High',
+    speed: 'Medium',
+    quantization: 'FP32',
+    runtime: 'nemo',
+    repo_id: 'nvidia/parakeet-rnnt-1.1b',
+    filename: 'parakeet-rnnt-1.1b.nemo'
   }
 };
 

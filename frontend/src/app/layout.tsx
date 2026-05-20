@@ -25,6 +25,7 @@ import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcess
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
+import { MeetingDetectedToast } from '@/components/MeetingDetectedToast'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -246,6 +247,9 @@ export default function RootLayout({
                             <ImportDialogProvider onOpen={handleOpenImportDialog}>
                               {/* Download progress toast provider - listens for background downloads */}
                               <DownloadProgressToastProvider />
+
+                              {/* Mic activity detection toast - shows when meeting detected */}
+                              {!showOnboarding && <MeetingDetectedToast />}
 
                               {/* Show onboarding or main app */}
                               {showOnboarding ? (

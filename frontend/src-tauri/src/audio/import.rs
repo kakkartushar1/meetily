@@ -4,6 +4,7 @@ use crate::api::TranscriptSegment;
 use crate::audio::decoder::{decode_audio_file, decode_audio_file_with_progress};
 use crate::audio::vad::get_speech_chunks_with_progress;
 use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
+use crate::nemo_engine::NemoEngine;
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
 use crate::whisper_engine::WhisperEngine;
@@ -507,14 +508,29 @@ async fn run_import<R: Runtime>(
 
     emit_progress(&app, "transcribing", 30, "Loading transcription engine...");
 
+    let parakeet_target_model = if use_parakeet && total_segments > 0 {
+        Some(resolve_parakeet_model(&app, model.as_deref()).await?)
+    } else {
+        None
+    };
+    let use_nemo = parakeet_target_model
+        .as_deref()
+        .map(crate::transcription_catalog::is_nemo_model)
+        .unwrap_or(false);
+
     // Initialize the appropriate engine
     let whisper_engine = if !use_parakeet && total_segments > 0 {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
     } else {
         None
     };
-    let parakeet_engine = if use_parakeet && total_segments > 0 {
-        Some(get_or_init_parakeet(&app, model.as_deref()).await?)
+    let parakeet_engine = if use_parakeet && !use_nemo && total_segments > 0 {
+        Some(get_or_init_parakeet(&app, parakeet_target_model.as_deref()).await?)
+    } else {
+        None
+    };
+    let nemo_engine = if use_nemo && total_segments > 0 {
+        Some(get_or_init_nemo(&app, parakeet_target_model.as_deref()).await?)
     } else {
         None
     };
@@ -580,11 +596,19 @@ async fn run_import<R: Runtime>(
 
         // Transcribe
         let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
+            let text = if use_nemo {
+                let engine = nemo_engine.as_ref().unwrap();
+                engine
+                    .transcribe_audio(segment.samples.clone())
+                    .await
+                    .map_err(|e| anyhow!("NeMo transcription failed on segment {}: {}", i, e))?
+            } else {
+                let engine = parakeet_engine.as_ref().unwrap();
+                engine
+                    .transcribe_audio(segment.samples.clone())
+                    .await
+                    .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?
+            };
             (text, 0.9f32)
         } else {
             let engine = whisper_engine.as_ref().unwrap();
@@ -836,6 +860,40 @@ async fn get_or_init_parakeet<R: Runtime>(
             Ok(e)
         }
         None => Err(anyhow!("Parakeet engine not initialized")),
+    }
+}
+
+/// Get or initialize the NeMo engine for `.nemo` Parakeet models.
+async fn get_or_init_nemo<R: Runtime>(
+    app: &AppHandle<R>,
+    requested_model: Option<&str>,
+) -> Result<Arc<NemoEngine>> {
+    let target_model = resolve_parakeet_model(app, requested_model).await?;
+
+    crate::nemo_engine::commands::nemo_validate_model_ready_internal(
+        app,
+        Some(target_model.clone()),
+    )
+    .await
+    .map_err(|e| anyhow!("Failed to load NeMo model '{}': {}", target_model, e))?;
+
+    let engine = {
+        let guard = crate::nemo_engine::commands::NEMO_ENGINE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().cloned()
+    };
+
+    engine.ok_or_else(|| anyhow!("NeMo engine not initialized"))
+}
+
+async fn resolve_parakeet_model<R: Runtime>(
+    app: &AppHandle<R>,
+    requested_model: Option<&str>,
+) -> Result<String> {
+    match requested_model {
+        Some(model) => Ok(model.to_string()),
+        None => get_configured_model(app, "parakeet").await,
     }
 }
 

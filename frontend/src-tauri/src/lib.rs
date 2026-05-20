@@ -47,13 +47,19 @@ pub mod onboarding;
 pub mod openai;
 pub mod anthropic;
 pub mod groq;
+pub mod nemo_engine;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod state;
 pub mod summary;
 pub mod tray;
+pub mod transcription_catalog;
 pub mod utils;
 pub mod whisper_engine;
+
+// Explicitly import summary commands for Tauri v2 compatibility
+use crate::summary::*;
+use crate::summary::summary_engine::*;
 
 use audio::{list_audio_devices, AudioDevice, trigger_audio_permission};
 use log::{error as log_error, info as log_info};
@@ -456,6 +462,10 @@ pub fn run() {
                 }
             });
 
+            // Set NeMo models and sidecar directory. The heavy Python sidecar is
+            // still lazy-started only when a .nemo model is selected.
+            nemo_engine::commands::set_models_directory(&_app.handle());
+
             // Initialize ModelManager for summary engine (async, non-blocking)
             let app_handle_for_model_manager = _app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -493,6 +503,20 @@ pub fn run() {
             } else {
                 log::warn!("Failed to resolve resource directory for templates");
             }
+
+            // Initialize mic activity monitoring based on user preference
+            let app_for_mic_monitor = _app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let enabled = audio::mic_activity_monitor::load_preference(&app_for_mic_monitor).await;
+                if enabled {
+                    log::info!("Mic activity monitoring is enabled by user preference, starting...");
+                    if let Err(e) = audio::mic_activity_monitor::start_monitoring(app_for_mic_monitor).await {
+                        log::error!("Failed to start mic activity monitoring on launch: {}", e);
+                    }
+                } else {
+                    log::info!("Mic activity monitoring is disabled by user preference, skipping");
+                }
+            });
 
             Ok(())
         })
@@ -555,6 +579,20 @@ pub fn run() {
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,
+            // NeMo engine commands
+            nemo_engine::commands::nemo_init,
+            nemo_engine::commands::nemo_get_available_models,
+            nemo_engine::commands::nemo_has_available_models,
+            nemo_engine::commands::nemo_load_model,
+            nemo_engine::commands::nemo_get_current_model,
+            nemo_engine::commands::nemo_is_model_loaded,
+            nemo_engine::commands::nemo_transcribe_audio,
+            nemo_engine::commands::nemo_get_models_directory,
+            nemo_engine::commands::nemo_validate_model_ready,
+            nemo_engine::commands::nemo_download_model,
+            nemo_engine::commands::nemo_cancel_download,
+            nemo_engine::commands::nemo_delete_model,
+            nemo_engine::commands::open_nemo_models_folder,
             // Parallel processing commands
             whisper_engine::parallel_commands::initialize_parallel_processor,
             whisper_engine::parallel_commands::start_parallel_processing,
@@ -631,23 +669,23 @@ pub fn run() {
             api::api_get_custom_openai_config,
             api::api_test_custom_openai_connection,
             // Summary commands
-            summary::api_process_transcript,
-            summary::api_get_summary,
-            summary::api_save_meeting_summary,
-            summary::api_cancel_summary,
+            api_process_transcript,
+            api_get_summary,
+            api_save_meeting_summary,
+            api_cancel_summary,
             // Template commands
-            summary::api_list_templates,
-            summary::api_get_template_details,
-            summary::api_validate_template,
+            api_list_templates,
+            api_get_template_details,
+            api_validate_template,
             // Built-in AI commands
-            summary::summary_engine::builtin_ai_list_models,
-            summary::summary_engine::builtin_ai_get_model_info,
-            summary::summary_engine::builtin_ai_download_model,
-            summary::summary_engine::builtin_ai_cancel_download,
-            summary::summary_engine::builtin_ai_delete_model,
-            summary::summary_engine::builtin_ai_is_model_ready,
-            summary::summary_engine::builtin_ai_get_available_summary_model,
-            summary::summary_engine::builtin_ai_get_recommended_model,
+            builtin_ai_list_models,
+            builtin_ai_get_model_info,
+            builtin_ai_download_model,
+            builtin_ai_cancel_download,
+            builtin_ai_delete_model,
+            builtin_ai_is_model_ready,
+            builtin_ai_get_available_summary_model,
+            builtin_ai_get_recommended_model,
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
@@ -716,6 +754,13 @@ pub fn run() {
             audio::import::start_import_audio_command,
             audio::import::cancel_import_command,
             audio::import::is_import_in_progress_command,
+            // Mic activity monitoring commands
+            audio::mic_activity_monitor::start_mic_activity_monitoring,
+            audio::mic_activity_monitor::stop_mic_activity_monitoring,
+            audio::mic_activity_monitor::get_mic_activity_monitoring_status,
+            audio::mic_activity_monitor::get_mic_activity_monitoring_preference,
+            audio::mic_activity_monitor::set_mic_activity_monitoring_preference,
+            audio::mic_activity_monitor::dismiss_mic_activity_detection,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

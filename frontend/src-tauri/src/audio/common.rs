@@ -22,6 +22,15 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
         if let Some(e) = engine {
             e.unload_model().await;
         }
+
+        use crate::nemo_engine::commands::NEMO_ENGINE;
+        let nemo_engine = {
+            let guard = NEMO_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+            guard.as_ref().cloned()
+        };
+        if let Some(e) = nemo_engine {
+            e.unload_model().await;
+        }
     } else {
         use crate::whisper_engine::commands::WHISPER_ENGINE;
         let engine = {

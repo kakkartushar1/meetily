@@ -34,3 +34,27 @@ pub const WHISPER_MODEL_CATALOG: &[(&str, &str, u32, &str, &str, &str)] = &[
     ("large-v3-turbo-q5_0", "ggml-large-v3-turbo-q5_0.bin", 547, "High", "Medium", "Quantized large model, best balance"),
     ("large-v3-q5_0", "ggml-large-v3-q5_0.bin", 1031, "High", "Slow", "Quantized large model, high accuracy"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_parakeet_model_stays_on_existing_onnx_runtime() {
+        let entry = crate::transcription_catalog::get_transcription_model(DEFAULT_PARAKEET_MODEL)
+            .expect("default Parakeet model should be in the catalog");
+
+        assert_eq!(entry.runtime, crate::transcription_catalog::TranscriptionRuntime::ParakeetOnnx);
+    }
+
+    #[test]
+    fn nvidia_parakeet_rnnt_1_1b_resolves_to_nemo_runtime() {
+        let entry = crate::transcription_catalog::get_transcription_model("nvidia/parakeet-rnnt-1.1b")
+            .expect("RNNT 1.1B should be in the catalog");
+
+        assert_eq!(entry.provider, "parakeet");
+        assert_eq!(entry.runtime, crate::transcription_catalog::TranscriptionRuntime::Nemo);
+        assert_eq!(entry.repo_id, Some("nvidia/parakeet-rnnt-1.1b"));
+        assert_eq!(entry.filename, Some("parakeet-rnnt-1.1b.nemo"));
+    }
+}

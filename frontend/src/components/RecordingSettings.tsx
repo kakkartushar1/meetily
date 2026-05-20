@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Switch } from '@/components/ui/switch';
-import { FolderOpen } from 'lucide-react';
+import { FolderOpen, Mic } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
 import Analytics from '@/lib/analytics';
@@ -29,6 +29,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
+  const [micMonitoringEnabled, setMicMonitoringEnabled] = useState(false);
 
   // Load recording preferences on component mount
   useEffect(() => {
@@ -66,6 +67,19 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       }
     };
     loadNotificationPref();
+  }, []);
+
+  // Load mic activity monitoring preference
+  useEffect(() => {
+    const loadMicMonitoringPref = async () => {
+      try {
+        const enabled = await invoke<boolean>('get_mic_activity_monitoring_preference');
+        setMicMonitoringEnabled(enabled);
+      } catch (error) {
+        console.error('Failed to load mic monitoring preference:', error);
+      }
+    };
+    loadMicMonitoringPref();
   }, []);
 
   const handleAutoSaveToggle = async (enabled: boolean) => {
@@ -118,6 +132,21 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     } catch (error) {
       console.error('Failed to save notification preference:', error);
       toast.error('Failed to save preference');
+    }
+  };
+
+  const handleMicMonitoringToggle = async (enabled: boolean) => {
+    try {
+      setMicMonitoringEnabled(enabled);
+      await invoke('set_mic_activity_monitoring_preference', { enabled });
+      toast.success(enabled ? 'Meeting detection enabled' : 'Meeting detection disabled');
+      await Analytics.track('mic_activity_monitoring_toggled', {
+        enabled: enabled.toString()
+      });
+    } catch (error) {
+      console.error('Failed to save mic monitoring preference:', error);
+      setMicMonitoringEnabled(!enabled); // Revert on error
+      toast.error('Failed to update preference');
     }
   };
 
@@ -209,6 +238,32 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
         <div className="p-4 border rounded-lg bg-yellow-50">
           <div className="text-sm text-yellow-800">
             Audio recording is disabled. Enable "Save Audio Recordings" to automatically save your meeting audio.
+          </div>
+        </div>
+      )}
+
+      {/* Meeting Detection Toggle */}
+      <div className="flex items-center justify-between p-4 border rounded-lg">
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <Mic className="w-4 h-4 text-red-500" />
+            <div className="font-medium">Auto-Detect Meetings</div>
+          </div>
+          <div className="text-sm text-gray-600 mt-1">
+            Monitor microphone activity to detect when a meeting starts and prompt you to record
+          </div>
+        </div>
+        <Switch
+          checked={micMonitoringEnabled}
+          onCheckedChange={handleMicMonitoringToggle}
+        />
+      </div>
+
+      {micMonitoringEnabled && (
+        <div className="p-4 border rounded-lg bg-blue-50">
+          <div className="text-sm text-blue-800">
+            <strong>How it works:</strong> When your microphone becomes active (e.g., during a call or meeting), 
+            you'll receive a notification asking if you'd like to start recording. Recording will never start automatically.
           </div>
         </div>
       )}
