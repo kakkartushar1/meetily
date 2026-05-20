@@ -1,10 +1,14 @@
-//! NVIDIA NeMo `.nemo` transcription runtime.
+//! NeMo ASR engine module.
 //!
-//! This module is intentionally separate from the ONNX Parakeet runtime. NeMo
-//! checkpoints require Python/PyTorch/NeMo, while existing Parakeet models stay
-//! on the Rust ONNX path.
+//! Manages a Python NeMo sidecar process for .nemo model inference.
+//! The sidecar is lazy-started only when a .nemo model is selected.
+//!
+//! # Module Structure
+//!
+//! - `nemo_engine`: Sidecar lifecycle and HTTP client
+//! - `commands`: Tauri command interface for frontend integration
 
-pub mod commands;
 pub mod nemo_engine;
+pub mod commands;
 
-pub use nemo_engine::NemoEngine;
+pub use nemo_engine::{NemoEngine, NemoModelInfo, NemoModelStatus};

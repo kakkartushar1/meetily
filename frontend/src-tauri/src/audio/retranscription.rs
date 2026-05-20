@@ -1,4 +1,4 @@
-// Retranscription module - allows re-processing stored audio with different settings
+﻿// Retranscription module - allows re-processing stored audio with different settings
 
 use crate::audio::decoder::decode_audio_file;
 use crate::audio::vad::get_speech_chunks_with_progress;
@@ -103,10 +103,20 @@ pub async fn start_retranscription<R: Runtime>(
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
     let use_parakeet = provider.as_deref() == Some("parakeet");
+    let use_nemo = use_parakeet && model.as_deref().map_or(false, crate::model_catalog::is_nemo_model);
     let result = run_retranscription(app.clone(), meeting_id.clone(), meeting_folder_path, language, model, provider).await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    if use_nemo {
+        // Unload NeMo model to release GPU/CPU memory
+        if let Ok(engine) = get_nemo_engine() {
+            if let Err(e) = engine.unload_model().await {
+                warn!("Failed to unload NeMo model after batch: {}", e);
+            }
+        }
+    } else {
+        super::common::unload_engine_after_batch(use_parakeet).await;
+    }
 
     // Guard will automatically clear flag on drop
     // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -183,10 +193,11 @@ async fn run_retranscription<R: Runtime>(
 
     // Determine which provider to use (default to whisper)
     let use_parakeet = provider.as_deref() == Some("parakeet");
+    let use_nemo = use_parakeet && model.as_deref().map_or(false, crate::model_catalog::is_nemo_model);
 
     info!(
-        "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
-        meeting_id, language, model, provider
+        "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?} (nemo={})",
+        meeting_id, language, model, provider, use_nemo
     );
 
     // Emit progress: decoding
@@ -322,6 +333,11 @@ async fn run_retranscription<R: Runtime>(
     };
     let nemo_engine = if use_nemo {
         Some(get_or_init_nemo(&app, parakeet_target_model.as_deref()).await?)
+    } else {
+        None
+    };
+    let nemo_engine = if use_nemo {
+        Some(get_or_init_nemo(&app, model.as_deref()).await?)
     } else {
         None
     };
@@ -1070,4 +1086,60 @@ mod tests {
         assert!(!AUDIO_EXTENSIONS.contains(&"txt"));
         assert!(!AUDIO_EXTENSIONS.contains(&"pdf"));
     }
+}
+
+// ============================================================================
+// NeMo engine helpers for retranscription
+// ============================================================================
+
+use crate::nemo_engine::NemoEngine;
+
+/// Get the NeMo engine instance.
+fn get_nemo_engine() -> Result<Arc<NemoEngine>> {
+    let guard = crate::nemo_engine::commands::NEMO_ENGINE
+        .lock()
+        .map_err(|e| anyhow!("NeMo engine lock error: {}", e))?;
+    guard
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow!("NeMo engine not initialized"))
+}
+
+/// Get or initialize the NeMo engine, auto-loading the model if needed.
+async fn get_or_init_nemo<R: Runtime>(
+    _app: &AppHandle<R>,
+    requested_model: Option<&str>,
+) -> Result<Arc<NemoEngine>> {
+    let engine = get_nemo_engine()?;
+
+    let target_model = match requested_model {
+        Some(model) => model.to_string(),
+        None => return Err(anyhow!("NeMo model must be explicitly specified")),
+    };
+
+    // Ensure sidecar is running
+    engine
+        .ensure_sidecar_running()
+        .await
+        .map_err(|e| anyhow!("Failed to start NeMo sidecar: {}", e))?;
+
+    // Check if the correct model is already loaded
+    let current_model = engine.get_current_model().await;
+    let needs_load = match &current_model {
+        Some(loaded) => loaded != &target_model,
+        None => true,
+    };
+
+    if needs_load {
+        info!("Loading NeMo model '{}' (current: {:?})", target_model, current_model);
+        engine
+            .load_model(&target_model)
+            .await
+            .map_err(|e| anyhow!("Failed to load NeMo model '{}': {}", target_model, e))?;
+        info!("NeMo model '{}' loaded successfully", target_model);
+    } else {
+        info!("NeMo model '{}' already loaded", target_model);
+    }
+
+    Ok(engine)
 }

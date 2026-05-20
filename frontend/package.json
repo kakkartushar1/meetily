@@ -8,6 +8,8 @@
         "build": "next build",
         "export": "next export",
         "start": "next start -p 3118",
+        "test": "vitest run",
+        "test:watch": "vitest",
         "tauri": "tauri",
         "tauri:dev": "node scripts/tauri-auto.js dev",
         "tauri:build": "node scripts/tauri-auto.js build",
@@ -92,6 +94,7 @@
         "@tauri-apps/plugin-fs": "~2.4.0",
         "@testing-library/jest-dom": "^6.9.1",
         "@testing-library/react": "^16.3.2",
+        "@testing-library/user-event": "^14.6.1",
         "@types/jest": "^30.0.0",
         "@types/node": "^20",
         "@types/react": "^18.3.18",
@@ -100,10 +103,12 @@
         "concurrently": "^8.2.2",
         "jest": "^30.4.2",
         "jest-environment-jsdom": "^30.4.1",
+        "jsdom": "^29.1.1",
         "postcss": "^8",
         "tailwindcss": "^3.4.1",
         "ts-jest": "^29.4.9",
         "typescript": "^5.7.2",
+        "vitest": "^4.1.6",
         "wait-on": "^7.2.0"
     }
 }

@@ -11,6 +11,7 @@ import {
   getModelDisplayName,
   formatFileSize
 } from '../lib/parakeet';
+import { CustomModelManager } from './CustomModelManager';
 
 interface ParakeetModelManagerProps {
   selectedModel?: string;
@@ -397,6 +398,22 @@ export function ParakeetModelManager({
           ))}
         </div>
       )}
+
+      {/* Divider */}
+      <div className="border-t border-gray-200 my-4" />
+
+      {/* Custom HuggingFace Models Section */}
+      <CustomModelManager
+        selectedModel={selectedModel || ''}
+        onModelSelect={(modelName) => {
+          if (onModelSelect) {
+            onModelSelect(modelName);
+          }
+          if (autoSave) {
+            saveModelSelection(modelName);
+          }
+        }}
+      />
 
       {/* Helper text */}
       {selectedModel && (

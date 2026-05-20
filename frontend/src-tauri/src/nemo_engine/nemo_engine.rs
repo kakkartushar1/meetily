@@ -1,615 +1,696 @@
+//! NeMo ASR Engine - manages the Python NeMo sidecar process.
+//!
+//! This module handles:
+//! - Spawning/stopping the Python FastAPI sidecar
+//! - HTTP communication with the sidecar
+//! - Model download, load, transcribe, unload lifecycle
+//! - Health checking and auto-restart
+
 use anyhow::{anyhow, Result};
-use futures_util::StreamExt;
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::fs;
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::process::Child;
-use tokio::sync::{Mutex, RwLock};
+use std::time::Duration;
+use tokio::process::{Child, Command};
+use tokio::sync::RwLock;
 
-use crate::parakeet_engine::{DownloadProgress, ModelInfo, ModelStatus, QuantizationType};
-use crate::transcription_catalog::{self, TranscriptionModelCatalogEntry};
+#[cfg(target_os = "windows")]
+#[allow(unused_imports)]
+use std::os::windows::process::CommandExt;
 
-const DEFAULT_NEMO_PORT: u16 = 5877;
-const SIDECAR_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
-const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+// ============================================================================
+// CONSTANTS
+// ============================================================================
 
+const SIDECAR_PORT: u16 = 9876;
+const SIDECAR_HOST: &str = "127.0.0.1";
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600); // 10 min for large transcriptions
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+/// Status of a NeMo model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NemoModelStatus {
+    Available,
+    Missing,
+    Downloading { progress: u8 },
+    Error(String),
+}
+
+/// Information about a NeMo model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NemoModelInfo {
+    pub model_id: String,
+    pub filename: String,
+    pub size_mb: u32,
+    pub label: String,
+    pub description: String,
+    pub status: NemoModelStatus,
+}
+
+/// Response from the sidecar /health endpoint.
 #[derive(Debug, Deserialize)]
 struct HealthResponse {
     status: String,
+    device: String,
+    model_loaded: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct LoadRequest<'a> {
-    model_id: &'a str,
-    model_path: &'a str,
+/// Response from the sidecar /models endpoint.
+#[derive(Debug, Deserialize)]
+struct SidecarModelInfo {
+    model_id: String,
+    filename: String,
+    size_bytes: u64,
+    ready: bool,
 }
 
+/// Response from the sidecar /download endpoint.
+#[derive(Debug, Deserialize)]
+struct DownloadResponse {
+    status: String,
+    path: Option<String>,
+    size_bytes: Option<u64>,
+}
+
+/// Response from the sidecar /load endpoint.
 #[derive(Debug, Deserialize)]
 struct LoadResponse {
     status: String,
+    model_id: Option<String>,
+    device: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct TranscribeRequest<'a> {
-    audio_path: &'a str,
-}
-
+/// Response from the sidecar /transcribe endpoint.
 #[derive(Debug, Deserialize)]
 struct TranscribeResponse {
     text: String,
 }
 
-/// Runtime manager for `.nemo` ASR models.
+/// Response from the sidecar /unload endpoint.
+#[derive(Debug, Deserialize)]
+struct UnloadResponse {
+    status: String,
+    model_id: Option<String>,
+}
+
+// ============================================================================
+// NEMO ENGINE
+// ============================================================================
+
 pub struct NemoEngine {
+    /// Child process handle for the Python sidecar
+    child_process: Arc<RwLock<Option<Child>>>,
+    /// Whether the sidecar is healthy
+    is_healthy: Arc<AtomicBool>,
+    /// HTTP client for sidecar communication
+    http_client: reqwest::Client,
+    /// Models directory root
     models_dir: PathBuf,
-    sidecar_dir: Option<PathBuf>,
-    current_model_name: Arc<RwLock<Option<String>>>,
-    active_downloads: Arc<RwLock<HashSet<String>>>,
+    /// Currently loaded model ID
+    current_model_id: Arc<RwLock<Option<String>>>,
+    /// Cancel download flag
     cancel_download_flag: Arc<RwLock<Option<String>>>,
-    child_process: Arc<Mutex<Option<Child>>>,
-    port: u16,
 }
 
 impl NemoEngine {
-    pub fn new(models_root: Option<PathBuf>, sidecar_dir: Option<PathBuf>) -> Result<Self> {
-        let models_dir = if let Some(root) = models_root {
-            root.join("nemo")
+    /// Create a new NeMo engine.
+    pub fn new(models_dir: Option<PathBuf>) -> Result<Self> {
+        let models_dir = if let Some(dir) = models_dir {
+            dir.join("nemo")
         } else {
-            dirs::data_dir()
-                .or_else(|| dirs::home_dir())
-                .ok_or_else(|| anyhow!("Could not find system data directory"))?
-                .join("Meetily")
-                .join("models")
-                .join("nemo")
+            let base = if cfg!(debug_assertions) {
+                std::env::current_dir()?.join("models")
+            } else {
+                dirs::data_dir()
+                    .or_else(dirs::home_dir)
+                    .ok_or_else(|| anyhow!("Could not find system data directory"))?
+                    .join("Meetily")
+                    .join("models")
+            };
+            base.join("nemo")
         };
+
+        info!("NemoEngine using models directory: {}", models_dir.display());
 
         if !models_dir.exists() {
             std::fs::create_dir_all(&models_dir)?;
         }
 
-        let port = std::env::var("MEETILY_NEMO_PORT")
-            .ok()
-            .and_then(|value| value.parse::<u16>().ok())
-            .unwrap_or(DEFAULT_NEMO_PORT);
+        let http_client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(Duration::from_secs(10))
+            .build()?;
 
         Ok(Self {
+            child_process: Arc::new(RwLock::new(None)),
+            is_healthy: Arc::new(AtomicBool::new(false)),
+            http_client,
             models_dir,
-            sidecar_dir,
-            current_model_name: Arc::new(RwLock::new(None)),
-            active_downloads: Arc::new(RwLock::new(HashSet::new())),
+            current_model_id: Arc::new(RwLock::new(None)),
             cancel_download_flag: Arc::new(RwLock::new(None)),
-            child_process: Arc::new(Mutex::new(None)),
-            port,
         })
     }
 
-    pub async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
-        let active_downloads = self.active_downloads.read().await;
+    /// Base URL for the sidecar HTTP service.
+    fn base_url(&self) -> String {
+        format!("http://{}:{}", SIDECAR_HOST, SIDECAR_PORT)
+    }
+
+    // ========================================================================
+    // SIDECAR LIFECYCLE
+    // ========================================================================
+
+    /// Ensure the Python sidecar is running.
+    pub async fn ensure_sidecar_running(&self) -> Result<()> {
+        if self.is_healthy.load(Ordering::SeqCst) {
+            // Quick health check
+            if self.health_check().await.is_ok() {
+                return Ok(());
+            }
+        }
+
+        self.start_sidecar().await
+    }
+
+    /// Start the Python NeMo sidecar process.
+    async fn start_sidecar(&self) -> Result<()> {
+        // Stop existing process if any
+        self.stop_sidecar().await?;
+
+        info!("Starting NeMo ASR sidecar...");
+
+        let sidecar_script = self.find_sidecar_script()?;
+        info!("Sidecar script: {}", sidecar_script.display());
+
+        let python = self.find_python()?;
+        info!("Python executable: {}", python.display());
+
+        let mut cmd = Command::new(&python);
+        cmd.arg(&sidecar_script)
+            .env("NEMO_MODELS_DIR", &self.models_dir)
+            .env("NEMO_ASR_PORT", SIDECAR_PORT.to_string())
+            .env("NEMO_ASR_HOST", SIDECAR_HOST)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let child = cmd.spawn().map_err(|e| {
+            anyhow!(
+                "Failed to start NeMo sidecar. Ensure Python is installed with NeMo dependencies. Error: {}",
+                e
+            )
+        })?;
+
+        {
+            let mut guard = self.child_process.write().await;
+            *guard = Some(child);
+        }
+
+        // Wait for sidecar to become healthy
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > STARTUP_TIMEOUT {
+                self.stop_sidecar().await?;
+                return Err(anyhow!(
+                    "NeMo sidecar failed to start within {:?}",
+                    STARTUP_TIMEOUT
+                ));
+            }
+
+            match self.health_check().await {
+                Ok(_) => {
+                    self.is_healthy.store(true, Ordering::SeqCst);
+                    info!("NeMo sidecar is healthy");
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Check if process has exited
+                    let mut guard = self.child_process.write().await;
+                    if let Some(ref mut child) = *guard {
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                *guard = None;
+                                return Err(anyhow!(
+                                    "NeMo sidecar exited during startup with status: {}",
+                                    status
+                                ));
+                            }
+                            Ok(None) => {} // Still running, keep waiting
+                            Err(e) => {
+                                warn!("Failed to check sidecar status: {}", e);
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    }
+
+    /// Stop the Python sidecar process.
+    pub async fn stop_sidecar(&self) -> Result<()> {
+        let mut guard = self.child_process.write().await;
+        if let Some(mut child) = guard.take() {
+            info!("Stopping NeMo sidecar...");
+
+            // Try graceful shutdown first
+            match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                Ok(Ok(status)) => {
+                    info!("NeMo sidecar exited with status: {}", status);
+                }
+                _ => {
+                    warn!("NeMo sidecar didn't exit gracefully, killing");
+                    let _ = child.kill().await;
+                }
+            }
+        }
+
+        self.is_healthy.store(false, Ordering::SeqCst);
+        *self.current_model_id.write().await = None;
+
+        Ok(())
+    }
+
+    /// Health check against the sidecar.
+    async fn health_check(&self) -> Result<HealthResponse> {
+        let url = format!("{}/health", self.base_url());
+        let resp = self
+            .http_client
+            .get(&url)
+            .timeout(HEALTH_CHECK_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Health check failed: {}", e))?;
+
+        let health: HealthResponse = resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse health response: {}", e))?;
+
+        Ok(health)
+    }
+
+    /// Find the Python executable.
+    fn find_python(&self) -> Result<PathBuf> {
+        // Check for venv in sidecar directory
+        let sidecar_dir = self.find_sidecar_dir()?;
+        let venv_python = if cfg!(windows) {
+            sidecar_dir.join(".venv").join("Scripts").join("python.exe")
+        } else {
+            sidecar_dir.join(".venv").join("bin").join("python")
+        };
+
+        if venv_python.exists() {
+            return Ok(venv_python);
+        }
+
+        // Check environment variable
+        if let Ok(python) = std::env::var("NEMO_PYTHON") {
+            let path = PathBuf::from(python);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        // Fallback to system Python
+        let candidates = if cfg!(windows) {
+            vec!["python.exe", "python3.exe"]
+        } else {
+            vec!["python3", "python"]
+        };
+
+        for candidate in candidates {
+            if which::which(candidate).is_ok() {
+                return Ok(PathBuf::from(candidate));
+            }
+        }
+
+        Err(anyhow!(
+            "Python not found. Install Python 3.10+ and NeMo dependencies."
+        ))
+    }
+
+    /// Find the sidecar directory.
+    fn find_sidecar_dir(&self) -> Result<PathBuf> {
+        // Check environment variable
+        if let Ok(dir) = std::env::var("NEMO_SIDECAR_DIR") {
+            let path = PathBuf::from(dir);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        // Check relative to executable
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let bundled = exe_dir.join("sidecars").join("nemo_asr");
+                if bundled.exists() {
+                    return Ok(bundled);
+                }
+            }
+        }
+
+        // Dev mode: relative to CARGO_MANIFEST_DIR
+        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            let dev_path = PathBuf::from(&manifest_dir)
+                .join("sidecars")
+                .join("nemo_asr");
+            if dev_path.exists() {
+                return Ok(dev_path);
+            }
+        }
+
+        Err(anyhow!("NeMo sidecar directory not found"))
+    }
+
+    /// Find the sidecar server.py script.
+    fn find_sidecar_script(&self) -> Result<PathBuf> {
+        let dir = self.find_sidecar_dir()?;
+        let script = dir.join("server.py");
+        if script.exists() {
+            Ok(script)
+        } else {
+            Err(anyhow!("NeMo sidecar server.py not found in {:?}", dir))
+        }
+    }
+
+    // ========================================================================
+    // MODEL OPERATIONS
+    // ========================================================================
+
+    /// Get available NeMo models (from catalog + local state).
+    pub async fn get_available_models(&self) -> Result<Vec<NemoModelInfo>> {
         let mut models = Vec::new();
 
-        for entry in transcription_catalog::nemo_models() {
-            let model_path = self.model_file_path(entry)?;
-            let status = if active_downloads.contains(entry.model_id) {
-                ModelStatus::Downloading { progress: 0 }
+        // Get catalog entries for NeMo runtime
+        for entry in crate::model_catalog::models_for_runtime(crate::model_catalog::ModelRuntime::Nemo) {
+            let model_dir = self.model_dir_for(entry.model_id);
+            let nemo_file = self.find_nemo_file(&model_dir);
+
+            let status = if let Some(ref path) = nemo_file {
+                if path.exists() && path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                    NemoModelStatus::Available
+                } else {
+                    NemoModelStatus::Missing
+                }
             } else {
-                self.model_status(entry, &model_path).await
+                NemoModelStatus::Missing
             };
 
-            models.push(ModelInfo {
-                name: entry.model_id.to_string(),
-                path: model_path,
+            models.push(NemoModelInfo {
+                model_id: entry.model_id.to_string(),
+                filename: entry.file.unwrap_or("").to_string(),
                 size_mb: entry.size_mb,
-                quantization: QuantizationType::FP32,
-                runtime: "nemo".to_string(),
-                speed: entry.speed.to_string(),
-                status,
+                label: entry.label.to_string(),
                 description: entry.description.to_string(),
+                status,
             });
         }
 
         Ok(models)
     }
 
-    pub async fn load_model(&self, model_name: &str) -> Result<()> {
-        let entry = self.catalog_entry(model_name)?;
-        let model_path = self.model_file_path(entry)?;
+    /// Download a NeMo model via the sidecar.
+    pub async fn download_model(&self, model_id: &str) -> Result<()> {
+        let entry = crate::model_catalog::lookup_model(model_id)
+            .ok_or_else(|| anyhow!("Model '{}' not found in catalog", model_id))?;
 
-        match self.model_status(entry, &model_path).await {
-            ModelStatus::Available => {}
-            ModelStatus::Missing => return Err(anyhow!("NeMo model {} is not downloaded", model_name)),
-            ModelStatus::Downloading { .. } => {
-                return Err(anyhow!("NeMo model {} is currently downloading", model_name));
-            }
-            ModelStatus::Error(err) => return Err(anyhow!("NeMo model {} has error: {}", model_name, err)),
-            ModelStatus::Corrupted { file_size, expected_min_size } => {
-                return Err(anyhow!(
-                    "NeMo model {} is incomplete: {} bytes (expected at least {})",
-                    model_name,
-                    file_size,
-                    expected_min_size
-                ));
-            }
-        }
-
-        if self.get_current_model().await.as_deref() == Some(model_name) {
-            return Ok(());
-        }
-
-        self.ensure_sidecar_running().await?;
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(format!("{}/load", self.base_url()))
-            .json(&LoadRequest {
-                model_id: entry.model_id,
-                model_path: &model_path.to_string_lossy(),
-            })
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to call NeMo sidecar /load: {}", e))?;
-
-        if !response.status().is_success() {
-            return Err(anyhow!("NeMo sidecar /load failed with status {}", response.status()));
-        }
-
-        let body: LoadResponse = response
-            .json()
-            .await
-            .map_err(|e| anyhow!("Invalid NeMo sidecar /load response: {}", e))?;
-
-        if body.status != "loaded" {
-            return Err(anyhow!("Unexpected NeMo load status: {}", body.status));
-        }
-
-        *self.current_model_name.write().await = Some(model_name.to_string());
-        Ok(())
-    }
-
-    pub async fn transcribe_audio(&self, audio_data: Vec<f32>) -> Result<String> {
-        let current_model = self
-            .get_current_model()
-            .await
-            .ok_or_else(|| anyhow!("No NeMo model loaded. Please load a model first."))?;
-
-        if audio_data.is_empty() {
-            return Ok(String::new());
-        }
-
-        self.ensure_sidecar_running().await?;
-
-        let temp_path = self.write_temp_wav(&audio_data).await?;
-        let temp_path_string = temp_path.to_string_lossy().to_string();
-
-        let client = reqwest::Client::new();
-        let result = async {
-            let response = client
-                .post(format!("{}/transcribe", self.base_url()))
-                .json(&TranscribeRequest {
-                    audio_path: &temp_path_string,
-                })
-                .send()
-                .await
-                .map_err(|e| anyhow!("Failed to call NeMo sidecar /transcribe: {}", e))?;
-
-            if !response.status().is_success() {
-                return Err(anyhow!(
-                    "NeMo sidecar /transcribe failed with status {} for model {}",
-                    response.status(),
-                    current_model
-                ));
-            }
-
-            let body: TranscribeResponse = response
-                .json()
-                .await
-                .map_err(|e| anyhow!("Invalid NeMo sidecar /transcribe response: {}", e))?;
-
-            Ok(body.text)
-        }
-        .await;
-
-        if let Err(e) = fs::remove_file(&temp_path).await {
-            log::warn!("Failed to remove temporary NeMo WAV {}: {}", temp_path.display(), e);
-        }
-
-        result
-    }
-
-    pub async fn unload_model(&self) -> bool {
-        let had_model = self.current_model_name.write().await.take().is_some();
-
-        if self.is_sidecar_healthy().await {
-            let client = reqwest::Client::new();
-            if let Err(e) = client.post(format!("{}/unload", self.base_url())).send().await {
-                log::warn!("Failed to unload NeMo sidecar model: {}", e);
-            }
-        }
-
-        had_model
-    }
-
-    pub async fn get_current_model(&self) -> Option<String> {
-        self.current_model_name.read().await.clone()
-    }
-
-    pub async fn is_model_loaded(&self) -> bool {
-        self.current_model_name.read().await.is_some()
-    }
-
-    pub async fn get_models_directory(&self) -> PathBuf {
-        self.models_dir.clone()
-    }
-
-    pub async fn delete_model(&self, model_name: &str) -> Result<String> {
-        let entry = self.catalog_entry(model_name)?;
-        let model_dir = self.model_dir(entry)?;
-
-        if model_dir.exists() {
-            fs::remove_dir_all(&model_dir)
-                .await
-                .map_err(|e| anyhow!("Failed to delete NeMo model directory: {}", e))?;
-        }
-
-        if self.get_current_model().await.as_deref() == Some(model_name) {
-            self.unload_model().await;
-        }
-
-        Ok(format!("Successfully deleted NeMo model '{}'", model_name))
-    }
-
-    pub async fn cancel_download(&self, model_name: &str) -> Result<()> {
-        *self.cancel_download_flag.write().await = Some(model_name.to_string());
-        self.active_downloads.write().await.remove(model_name);
-        Ok(())
-    }
-
-    pub async fn download_model_detailed(
-        &self,
-        model_name: &str,
-        progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send + Sync>>,
-    ) -> Result<()> {
-        let entry = self.catalog_entry(model_name)?;
-        let repo_id = entry
-            .repo_id
-            .ok_or_else(|| anyhow!("NeMo model {} does not define a Hugging Face repo", model_name))?;
         let filename = entry
-            .filename
-            .ok_or_else(|| anyhow!("NeMo model {} does not define a model filename", model_name))?;
+            .file
+            .ok_or_else(|| anyhow!("Model '{}' has no filename in catalog", model_id))?;
 
-        {
-            let mut active = self.active_downloads.write().await;
-            if !active.insert(model_name.to_string()) {
-                return Err(anyhow!("Download already in progress for {}", model_name));
-            }
-        }
+        let repo_id = entry
+            .repo
+            .ok_or_else(|| anyhow!("Model '{}' has no repo in catalog", model_id))?;
 
+        // Ensure sidecar is running
+        self.ensure_sidecar_running().await?;
+
+        // Clear cancel flag
         *self.cancel_download_flag.write().await = None;
 
-        let model_dir = self.model_dir(entry)?;
-        if !model_dir.exists() {
-            fs::create_dir_all(&model_dir).await?;
-        }
-
-        let file_path = model_dir.join(filename);
-        let expected_size = expected_size_bytes(entry);
-        if let Ok(metadata) = fs::metadata(&file_path).await {
-            if metadata.len() >= expected_size {
-                if let Some(callback) = progress_callback.as_ref() {
-                    callback(DownloadProgress::new(expected_size, expected_size, 0.0));
-                }
-                self.active_downloads.write().await.remove(model_name);
-                return Ok(());
-            }
-        }
-
-        let url = format!("https://huggingface.co/{}/resolve/main/{}", repo_id, filename);
-        let client = reqwest::Client::new();
-        let mut response = client
-            .get(url)
+        let url = format!("{}/download", self.base_url());
+        let resp = self
+            .http_client
+            .post(&url)
+            .json(&serde_json::json!({
+                "repo_id": repo_id,
+                "filename": filename,
+            }))
             .send()
             .await
-            .map_err(|e| anyhow!("Failed to start NeMo model download: {}", e))?;
+            .map_err(|e| anyhow!("Download request failed: {}", e))?;
 
-        if !response.status().is_success() {
-            self.active_downloads.write().await.remove(model_name);
-            return Err(anyhow!("NeMo model download failed with status {}", response.status()));
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Download failed (HTTP {}): {}", status, body));
         }
 
-        let total_size = response.content_length().unwrap_or(expected_size).max(expected_size);
-        let file = fs::File::create(&file_path).await?;
-        let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, file);
-        let mut stream = response.bytes_stream();
-        let mut downloaded = 0u64;
-        let started = Instant::now();
-        let mut last_report = Instant::now();
-        let mut bytes_since_report = 0u64;
-
-        while let Some(chunk_result) = tokio::time::timeout(DOWNLOAD_STALL_TIMEOUT, stream.next())
+        let download_resp: DownloadResponse = resp
+            .json()
             .await
-            .map_err(|_| anyhow!("Download timeout - no data received for 30 seconds"))?
-        {
-            if self.cancel_download_flag.read().await.as_deref() == Some(model_name) {
-                self.active_downloads.write().await.remove(model_name);
-                return Err(anyhow!("Download cancelled by user"));
-            }
+            .map_err(|e| anyhow!("Failed to parse download response: {}", e))?;
 
-            let chunk = chunk_result.map_err(|e| anyhow!("Download stream failed: {}", e))?;
-            writer.write_all(&chunk).await?;
+        info!(
+            "Download result for {}: status={}",
+            model_id, download_resp.status
+        );
 
-            let chunk_len = chunk.len() as u64;
-            downloaded += chunk_len;
-            bytes_since_report += chunk_len;
-
-            let elapsed_since_report = last_report.elapsed();
-            if elapsed_since_report >= Duration::from_millis(500) || downloaded >= total_size {
-                let speed_mbps = if elapsed_since_report.as_secs_f64() > 0.0 {
-                    (bytes_since_report as f64 / (1024.0 * 1024.0))
-                        / elapsed_since_report.as_secs_f64()
-                } else {
-                    0.0
-                };
-                if let Some(callback) = progress_callback.as_ref() {
-                    callback(DownloadProgress::new(downloaded, total_size, speed_mbps));
-                }
-                last_report = Instant::now();
-                bytes_since_report = 0;
-            }
-        }
-
-        writer.flush().await?;
-
-        if let Some(callback) = progress_callback.as_ref() {
-            let elapsed = started.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 {
-                (downloaded as f64 / (1024.0 * 1024.0)) / elapsed
-            } else {
-                0.0
-            };
-            callback(DownloadProgress::new(total_size, total_size, speed));
-        }
-
-        self.active_downloads.write().await.remove(model_name);
         Ok(())
     }
 
-    fn catalog_entry(&self, model_name: &str) -> Result<&'static TranscriptionModelCatalogEntry> {
-        transcription_catalog::get_transcription_model(model_name)
-            .filter(|entry| entry.runtime == transcription_catalog::TranscriptionRuntime::Nemo)
-            .ok_or_else(|| anyhow!("NeMo model '{}' is not in the transcription catalog", model_name))
+    /// Cancel an ongoing download.
+    pub async fn cancel_download(&self, model_id: &str) -> Result<()> {
+        *self.cancel_download_flag.write().await = Some(model_id.to_string());
+        info!("Download cancellation requested for: {}", model_id);
+        Ok(())
     }
 
-    fn model_dir(&self, entry: &TranscriptionModelCatalogEntry) -> Result<PathBuf> {
-        let repo_id = entry
-            .repo_id
-            .ok_or_else(|| anyhow!("NeMo model {} does not define repo_id", entry.model_id))?;
-        Ok(self.models_dir.join(sanitize_repo_id(repo_id)))
-    }
+    /// Load a NeMo model into memory via the sidecar.
+    pub async fn load_model(&self, model_id: &str) -> Result<()> {
+        // Ensure sidecar is running
+        self.ensure_sidecar_running().await?;
 
-    fn model_file_path(&self, entry: &TranscriptionModelCatalogEntry) -> Result<PathBuf> {
-        let filename = entry
-            .filename
-            .ok_or_else(|| anyhow!("NeMo model {} does not define filename", entry.model_id))?;
-        Ok(self.model_dir(entry)?.join(filename))
-    }
+        let url = format!("{}/load", self.base_url());
+        let resp = self
+            .http_client
+            .post(&url)
+            .json(&serde_json::json!({ "model_id": model_id }))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Load request failed: {}", e))?;
 
-    async fn model_status(
-        &self,
-        entry: &TranscriptionModelCatalogEntry,
-        model_path: &Path,
-    ) -> ModelStatus {
-        if !model_path.exists() {
-            return ModelStatus::Missing;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Load failed (HTTP {}): {}", status, body));
         }
 
-        match fs::metadata(model_path).await {
-            Ok(metadata) => {
-                let expected_min_size = expected_size_bytes(entry);
-                if metadata.len() >= expected_min_size {
-                    ModelStatus::Available
-                } else {
-                    ModelStatus::Corrupted {
-                        file_size: metadata.len(),
-                        expected_min_size,
-                    }
-                }
-            }
-            Err(e) => ModelStatus::Error(e.to_string()),
-        }
+        let load_resp: LoadResponse = resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse load response: {}", e))?;
+
+        *self.current_model_id.write().await = Some(model_id.to_string());
+        info!(
+            "NeMo model loaded: {} (device: {})",
+            model_id,
+            load_resp.device.as_deref().unwrap_or("unknown")
+        );
+
+        Ok(())
     }
 
-    async fn ensure_sidecar_running(&self) -> Result<()> {
-        if self.is_sidecar_healthy().await {
+    /// Transcribe audio using the loaded NeMo model.
+    ///
+    /// `audio_data` should be 16 kHz mono f32 samples.
+    pub async fn transcribe_audio(&self, audio_data: Vec<f32>) -> Result<String> {
+        if !self.is_healthy.load(Ordering::SeqCst) {
+            return Err(anyhow!("NeMo sidecar is not running"));
+        }
+
+        // Write audio to a temp WAV file
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join(format!("nemo_audio_{}.wav", uuid::Uuid::new_v4()));
+
+        // Convert f32 samples to i16 WAV
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+
+        let mut writer = hound::WavWriter::create(&temp_path, spec)
+            .map_err(|e| anyhow!("Failed to create temp WAV: {}", e))?;
+
+        for sample in &audio_data {
+            let s16 = (*sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+            writer
+                .write_sample(s16)
+                .map_err(|e| anyhow!("Failed to write WAV sample: {}", e))?;
+        }
+        writer
+            .finalize()
+            .map_err(|e| anyhow!("Failed to finalize WAV: {}", e))?;
+
+        // Send to sidecar
+        let url = format!("{}/transcribe", self.base_url());
+        let file_bytes = tokio::fs::read(&temp_path).await?;
+
+        let form = reqwest::multipart::Form::new().part(
+            "audio",
+            reqwest::multipart::Part::bytes(file_bytes)
+                .file_name("audio.wav")
+                .mime_str("audio/wav")?,
+        );
+
+        let resp = self
+            .http_client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Transcribe request failed: {}", e))?;
+
+        // Clean up temp file
+        let _ = tokio::fs::remove_file(&temp_path).await;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Transcription failed (HTTP {}): {}", status, body));
+        }
+
+        let transcribe_resp: TranscribeResponse = resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse transcribe response: {}", e))?;
+
+        Ok(transcribe_resp.text)
+    }
+
+    /// Unload the current model from the sidecar.
+    pub async fn unload_model(&self) -> Result<()> {
+        if !self.is_healthy.load(Ordering::SeqCst) {
+            *self.current_model_id.write().await = None;
             return Ok(());
         }
 
-        self.spawn_sidecar().await?;
-
-        let started = Instant::now();
-        while started.elapsed() < SIDECAR_STARTUP_TIMEOUT {
-            if self.is_sidecar_healthy().await {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-
-        Err(anyhow!("Timed out waiting for NeMo sidecar to become healthy"))
-    }
-
-    async fn is_sidecar_healthy(&self) -> bool {
-        let client = reqwest::Client::new();
-        let result = client
-            .get(format!("{}/health", self.base_url()))
-            .timeout(Duration::from_millis(750))
+        let url = format!("{}/unload", self.base_url());
+        let resp = self
+            .http_client
+            .post(&url)
             .send()
-            .await;
+            .await
+            .map_err(|e| anyhow!("Unload request failed: {}", e))?;
 
-        match result {
-            Ok(response) if response.status().is_success() => {
-                response
-                    .json::<HealthResponse>()
-                    .await
-                    .map(|body| body.status == "ok")
-                    .unwrap_or(false)
-            }
-            _ => false,
-        }
-    }
-
-    async fn spawn_sidecar(&self) -> Result<()> {
-        let script_path = self.find_sidecar_script()?;
-        let python = std::env::var("MEETILY_NEMO_PYTHON").unwrap_or_else(|_| "python".to_string());
-
-        let mut command = tokio::process::Command::new(python);
-        command
-            .arg(&script_path)
-            .arg("--port")
-            .arg(self.port.to_string())
-            .arg("--models-dir")
-            .arg(&self.models_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            command.creation_flags(CREATE_NO_WINDOW);
+        if resp.status().is_success() {
+            let unload_resp: UnloadResponse = resp.json().await.unwrap_or(UnloadResponse {
+                status: "unknown".to_string(),
+                model_id: None,
+            });
+            info!("NeMo model unloaded: {:?}", unload_resp.model_id);
         }
 
-        let child = command
-            .spawn()
-            .map_err(|e| anyhow!("Failed to spawn NeMo sidecar at {}: {}", script_path.display(), e))?;
-
-        *self.child_process.lock().await = Some(child);
+        *self.current_model_id.write().await = None;
         Ok(())
     }
 
-    fn find_sidecar_script(&self) -> Result<PathBuf> {
-        if let Ok(path) = std::env::var("MEETILY_NEMO_SIDECAR") {
-            let path = PathBuf::from(path);
-            if path.exists() {
-                return Ok(path);
+    /// Check if a model is loaded.
+    pub async fn is_model_loaded(&self) -> bool {
+        self.current_model_id.read().await.is_some()
+    }
+
+    /// Get the currently loaded model ID.
+    pub async fn get_current_model(&self) -> Option<String> {
+        self.current_model_id.read().await.clone()
+    }
+
+    /// Get the models directory.
+    pub fn get_models_directory(&self) -> &PathBuf {
+        &self.models_dir
+    }
+
+    /// Validate that a NeMo model is ready for transcription.
+    pub async fn validate_model_ready(&self, model_id: &str) -> Result<()> {
+        // Check if model files exist locally
+        let model_dir = self.model_dir_for(model_id);
+        let nemo_file = self.find_nemo_file(&model_dir);
+
+        match nemo_file {
+            Some(path) if path.exists() => {
+                info!("NeMo model files found: {}", path.display());
+                Ok(())
+            }
+            _ => Err(anyhow!(
+                "NeMo model '{}' is not downloaded. Please download it first.",
+                model_id
+            )),
+        }
+    }
+
+    /// Delete a downloaded model.
+    pub async fn delete_model(&self, model_id: &str) -> Result<()> {
+        let model_dir = self.model_dir_for(model_id);
+        if model_dir.exists() {
+            tokio::fs::remove_dir_all(&model_dir).await?;
+            info!("Deleted NeMo model directory: {}", model_dir.display());
+        }
+
+        // Unload if currently loaded
+        if self.current_model_id.read().await.as_deref() == Some(model_id) {
+            self.unload_model().await?;
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // HELPERS
+    // ========================================================================
+
+    /// Get the local directory for a model.
+    fn model_dir_for(&self, model_id: &str) -> PathBuf {
+        let safe_name = model_id.replace('/', "--");
+        self.models_dir.join(safe_name)
+    }
+
+    /// Find a .nemo file in a model directory.
+    fn find_nemo_file(&self, model_dir: &PathBuf) -> Option<PathBuf> {
+        if !model_dir.exists() {
+            return None;
+        }
+        if let Ok(entries) = std::fs::read_dir(model_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("nemo") {
+                    return Some(path);
+                }
             }
         }
-
-        let mut candidates = Vec::new();
-        if let Some(dir) = &self.sidecar_dir {
-            candidates.push(dir.join("server.py"));
-        }
-        if let Ok(current_dir) = std::env::current_dir() {
-            candidates.push(current_dir.join("sidecars").join("nemo_asr").join("server.py"));
-            candidates.push(
-                current_dir
-                    .join("src-tauri")
-                    .join("sidecars")
-                    .join("nemo_asr")
-                    .join("server.py"),
-            );
-            candidates.push(
-                current_dir
-                    .join("frontend")
-                    .join("src-tauri")
-                    .join("sidecars")
-                    .join("nemo_asr")
-                    .join("server.py"),
-            );
-        }
-
-        candidates
-            .into_iter()
-            .find(|path| path.exists())
-            .ok_or_else(|| anyhow!("NeMo sidecar script not found. Set MEETILY_NEMO_SIDECAR to server.py."))
-    }
-
-    fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-
-    async fn write_temp_wav(&self, samples: &[f32]) -> Result<PathBuf> {
-        let temp_dir = self.models_dir.join("tmp");
-        if !temp_dir.exists() {
-            fs::create_dir_all(&temp_dir).await?;
-        }
-
-        let path = temp_dir.join(format!("nemo-{}.wav", uuid::Uuid::new_v4()));
-        let samples = samples.to_vec();
-        let path_for_write = path.clone();
-
-        tokio::task::spawn_blocking(move || write_wav_16khz_mono(&path_for_write, &samples))
-            .await
-            .map_err(|e| anyhow!("Failed to join WAV write task: {}", e))??;
-
-        Ok(path)
+        None
     }
 }
 
 impl Drop for NemoEngine {
     fn drop(&mut self) {
-        if let Ok(mut child_guard) = self.child_process.try_lock() {
-            if let Some(child) = child_guard.as_mut() {
-                let _ = child.start_kill();
-            }
-        }
-    }
-}
-
-fn sanitize_repo_id(repo_id: &str) -> String {
-    repo_id.replace('/', "--")
-}
-
-fn expected_size_bytes(entry: &TranscriptionModelCatalogEntry) -> u64 {
-    // Allow minor upstream metadata/file-size variance while still catching
-    // partial downloads.
-    (entry.size_mb as u64 * 1024 * 1024 * 95) / 100
-}
-
-fn write_wav_16khz_mono(path: &Path, samples: &[f32]) -> Result<()> {
-    use std::io::Write;
-
-    let mut file = std::fs::File::create(path)?;
-    let channels = 1u16;
-    let sample_rate = 16_000u32;
-    let bits_per_sample = 16u16;
-    let bytes_per_sample = (bits_per_sample / 8) as u32;
-    let data_len = samples.len() as u32 * bytes_per_sample;
-    let byte_rate = sample_rate * channels as u32 * bytes_per_sample;
-    let block_align = channels * (bits_per_sample / 8);
-
-    file.write_all(b"RIFF")?;
-    file.write_all(&(36 + data_len).to_le_bytes())?;
-    file.write_all(b"WAVE")?;
-    file.write_all(b"fmt ")?;
-    file.write_all(&16u32.to_le_bytes())?;
-    file.write_all(&1u16.to_le_bytes())?;
-    file.write_all(&channels.to_le_bytes())?;
-    file.write_all(&sample_rate.to_le_bytes())?;
-    file.write_all(&byte_rate.to_le_bytes())?;
-    file.write_all(&block_align.to_le_bytes())?;
-    file.write_all(&bits_per_sample.to_le_bytes())?;
-    file.write_all(b"data")?;
-    file.write_all(&data_len.to_le_bytes())?;
-
-    for sample in samples {
-        let clamped = sample.clamp(-1.0, 1.0);
-        let int_sample = (clamped * i16::MAX as f32) as i16;
-        file.write_all(&int_sample.to_le_bytes())?;
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn repo_ids_are_sanitized_for_directories() {
-        assert_eq!(sanitize_repo_id("nvidia/parakeet-rnnt-1.1b"), "nvidia--parakeet-rnnt-1.1b");
+        // Best-effort cleanup; can't do async in Drop
+        debug!("NemoEngine dropped");
     }
 }

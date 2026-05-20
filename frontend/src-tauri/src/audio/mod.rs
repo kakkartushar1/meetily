@@ -34,6 +34,7 @@ pub mod batch_processor;
 pub mod system_detector;
 pub mod system_audio_commands;
 pub mod device_monitor;  // NEW: Device disconnect/reconnect monitoring
+pub mod mic_activity_monitor; // NEW: Microphone activity detection
 pub mod playback_monitor; // NEW: Playback device detection for BT warnings
 pub mod mic_activity_monitor; // NEW: Microphone activity detection for meeting auto-detection
 

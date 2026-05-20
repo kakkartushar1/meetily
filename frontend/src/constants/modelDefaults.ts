@@ -3,6 +3,8 @@
  * IMPORTANT: Keep in sync with Rust constants in src-tauri/src/config.rs
  */
 
+import { isNemoModel } from './modelCatalog';
+
 /**
  * Default Whisper model for transcription when no preference is configured.
  * This is the recommended balance of accuracy and speed.
@@ -23,3 +25,11 @@ export const MODEL_DEFAULTS = {
   localWhisper: DEFAULT_WHISPER_MODEL,
   parakeet: DEFAULT_PARAKEET_MODEL,
 } as const;
+
+/**
+ * Check if a model requires the NeMo runtime.
+ * Used to decide which Tauri commands to invoke.
+ */
+export function requiresNemoRuntime(modelId: string): boolean {
+  return isNemoModel(modelId);
+}
