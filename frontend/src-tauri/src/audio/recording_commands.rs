@@ -657,10 +657,9 @@ pub async fn stop_recording<R: Runtime>(
                         .unwrap_or_else(|| "unknown".to_string());
                     info!("Current NeMo model before unload: '{}'", current_model);
 
-                    if engine.unload_model().await {
-                        info!("NeMo model '{}' unloaded successfully", current_model);
-                    } else {
-                        warn!("Failed to unload NeMo model '{}'", current_model);
+                    match engine.unload_model().await {
+                        Ok(()) => info!("NeMo model '{}' unloaded successfully", current_model),
+                        Err(e) => warn!("Failed to unload NeMo model '{}': {}", current_model, e),
                     }
                 } else {
                     warn!("No NeMo engine found to unload model");

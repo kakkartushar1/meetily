@@ -251,6 +251,121 @@ pub async fn nemo_unload_model() -> Result<(), String> {
 }
 
 // ============================================================================
+// FUNCTIONS USED BY PARAKEET ENGINE & OTHER MODULES
+// ============================================================================
+
+/// Initialize the models directory path using app_data_dir.
+/// Called from lib.rs during app setup.
+pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
+    let app_data_dir = app.path().app_data_dir()
+        .expect("Failed to get app data dir");
+    let models_dir = app_data_dir.join("models");
+    if !models_dir.exists() {
+        if let Err(e) = std::fs::create_dir_all(&models_dir) {
+            error!("Failed to create NeMo models directory: {}", e);
+        }
+    }
+    info!("NeMo models directory set to: {}", models_dir.display());
+}
+
+/// Validate that a NeMo model is ready (internal version used by other modules).
+/// This ensures the sidecar is running and the model is loaded.
+pub async fn nemo_validate_model_ready_internal<R: Runtime>(
+    app: &AppHandle<R>,
+    model_id: Option<String>,
+) -> Result<String, String> {
+    // Ensure engine is initialized (check without holding lock across await)
+    let needs_init = {
+        let guard = NEMO_ENGINE.lock().map_err(|e| format!("Lock error: {}", e))?;
+        guard.is_none()
+    };
+    if needs_init {
+        nemo_init(app.clone()).await?;
+    }
+
+    let engine = get_engine()?;
+    let model = model_id.ok_or_else(|| "No model ID specified".to_string())?;
+
+    // Validate model files exist
+    engine
+        .validate_model_ready(&model)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Ensure sidecar is running
+    engine
+        .ensure_sidecar_running()
+        .await
+        .map_err(|e| format!("Failed to start NeMo sidecar: {}", e))?;
+
+    // Load the model
+    engine
+        .load_model(&model)
+        .await
+        .map_err(|e| format!("Failed to load NeMo model: {}", e))?;
+
+    Ok(model)
+}
+
+/// Get the currently loaded NeMo model ID.
+pub async fn nemo_get_current_model() -> Result<Option<String>, String> {
+    let engine = get_engine()?;
+    Ok(engine.get_current_model().await)
+}
+
+/// Check if a NeMo model is currently loaded.
+pub async fn nemo_is_model_loaded() -> Result<bool, String> {
+    let engine = get_engine()?;
+    Ok(engine.is_model_loaded().await)
+}
+
+/// Download a NeMo model with a custom event prefix (used by parakeet_engine).
+pub async fn nemo_download_model_with_event_prefix<R: Runtime>(
+    app: AppHandle<R>,
+    model_id: String,
+    event_prefix: &str,
+) -> Result<(), String> {
+    // Ensure engine is initialized (check without holding lock across await)
+    let needs_init = {
+        let guard = NEMO_ENGINE.lock().map_err(|e| format!("Lock error: {}", e))?;
+        guard.is_none()
+    };
+    if needs_init {
+        nemo_init(app.clone()).await?;
+    }
+
+    let engine = get_engine()?;
+
+    let _ = app.emit(
+        &format!("{}-download-started", event_prefix),
+        serde_json::json!({ "modelName": &model_id }),
+    );
+
+    match engine.download_model(&model_id).await {
+        Ok(()) => {
+            let _ = app.emit(
+                &format!("{}-download-complete", event_prefix),
+                serde_json::json!({ "modelName": &model_id }),
+            );
+            info!("NeMo model download complete via {}: {}", event_prefix, model_id);
+            Ok(())
+        }
+        Err(e) => {
+            let error_msg = e.to_string();
+            let _ = app.emit(
+                &format!("{}-download-error", event_prefix),
+                serde_json::json!({
+                    "modelName": &model_id,
+                    "error": &error_msg
+                }),
+            );
+            error!("NeMo model download failed via {}: {}", event_prefix, error_msg);
+            Err(error_msg)
+        }
+    }
+}
+
+// ============================================================================
 // HELPERS
 // ============================================================================
 

@@ -14,10 +14,7 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
-  // Use oxc for TS and esbuild for TSX (JSX support)
-  oxc: false,
   esbuild: {
-    jsx: 'automatic',
     include: /\.[jt]sx?$/,
   },
 });

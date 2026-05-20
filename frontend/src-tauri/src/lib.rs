@@ -52,7 +52,6 @@ pub mod anthropic;
 pub mod groq;
 pub mod nemo_engine;
 pub mod openrouter;
-pub mod nemo_engine;
 pub mod parakeet_engine;
 pub mod state;
 pub mod summary;
@@ -763,8 +762,8 @@ pub fn run() {
             audio::import::cancel_import_command,
             audio::import::is_import_in_progress_command,
             // Mic activity monitoring commands
-            audio::mic_activity_monitor::start_mic_activity_monitoring,
-            audio::mic_activity_monitor::stop_mic_activity_monitoring,
+            audio::mic_activity_monitor::start_mic_activity_monitoring_command,
+            audio::mic_activity_monitor::stop_mic_activity_monitoring_command,
             audio::mic_activity_monitor::get_mic_activity_monitoring_status,
             audio::mic_activity_monitor::get_mic_activity_monitoring_preference,
             audio::mic_activity_monitor::set_mic_activity_monitoring_preference,

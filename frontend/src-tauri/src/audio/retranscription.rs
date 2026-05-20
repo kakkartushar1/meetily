@@ -718,29 +718,7 @@ async fn get_or_init_parakeet<R: Runtime>(
     }
 }
 
-/// Get or initialize the NeMo engine for `.nemo` Parakeet models.
-async fn get_or_init_nemo<R: Runtime>(
-    app: &AppHandle<R>,
-    requested_model: Option<&str>,
-) -> Result<Arc<NemoEngine>> {
-    let target_model = resolve_parakeet_model(app, requested_model).await?;
 
-    crate::nemo_engine::commands::nemo_validate_model_ready_internal(
-        app,
-        Some(target_model.clone()),
-    )
-    .await
-    .map_err(|e| anyhow!("Failed to load NeMo model '{}': {}", target_model, e))?;
-
-    let engine = {
-        let guard = crate::nemo_engine::commands::NEMO_ENGINE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().cloned()
-    };
-
-    engine.ok_or_else(|| anyhow!("NeMo engine not initialized"))
-}
 
 async fn resolve_parakeet_model<R: Runtime>(
     app: &AppHandle<R>,
@@ -1091,8 +1069,6 @@ mod tests {
 // ============================================================================
 // NeMo engine helpers for retranscription
 // ============================================================================
-
-use crate::nemo_engine::NemoEngine;
 
 /// Get the NeMo engine instance.
 fn get_nemo_engine() -> Result<Arc<NemoEngine>> {

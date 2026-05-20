@@ -74,13 +74,30 @@ pub async fn parakeet_get_available_models() -> Result<Vec<ModelInfo>, String> {
         Err("Parakeet engine not initialized".to_string())
     }?;
 
-    if let Err(e) = crate::nemo_engine::commands::nemo_init().await {
-        log::warn!("Failed to initialize NeMo engine while listing Parakeet models: {}", e);
-    } else {
-        match crate::nemo_engine::commands::nemo_get_available_models().await {
-            Ok(mut nemo_models) => models.append(&mut nemo_models),
-            Err(e) => log::warn!("Failed to discover NeMo Parakeet models: {}", e),
+    // Try to get NeMo models - nemo_init requires no arguments in this context
+    // since the engine may already be initialized from app startup
+    match crate::nemo_engine::commands::nemo_get_available_models().await {
+        Ok(nemo_models) => {
+            // Convert NemoModelInfo to ModelInfo for unified listing
+            for nemo_model in nemo_models {
+                models.push(ModelInfo {
+                    name: nemo_model.model_id.clone(),
+                    path: std::path::PathBuf::from(&nemo_model.filename),
+                    size_mb: nemo_model.size_mb,
+                    quantization: crate::parakeet_engine::QuantizationType::FP32,
+                    runtime: "nemo".to_string(),
+                    speed: "NeMo ASR".to_string(),
+                    status: match nemo_model.status {
+                        crate::nemo_engine::nemo_engine::NemoModelStatus::Available => ModelStatus::Available,
+                        crate::nemo_engine::nemo_engine::NemoModelStatus::Missing => ModelStatus::Missing,
+                        crate::nemo_engine::nemo_engine::NemoModelStatus::Downloading { progress } => ModelStatus::Downloading { progress },
+                        crate::nemo_engine::nemo_engine::NemoModelStatus::Error(msg) => ModelStatus::Error(msg),
+                    },
+                    description: nemo_model.description,
+                });
+            }
         }
+        Err(e) => log::warn!("Failed to discover NeMo Parakeet models: {}", e),
     }
 
     Ok(models)
