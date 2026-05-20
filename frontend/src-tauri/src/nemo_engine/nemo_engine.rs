@@ -18,6 +18,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 
 #[cfg(target_os = "windows")]
+#[allow(unused_imports)]
 use std::os::windows::process::CommandExt;
 
 // ============================================================================

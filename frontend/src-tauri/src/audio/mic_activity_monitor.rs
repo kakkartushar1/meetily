@@ -423,4 +423,38 @@ mod tests {
         // but AtomicBool is thread-safe
         assert!(!IS_MONITORING.load(Ordering::SeqCst) || IS_MONITORING.load(Ordering::SeqCst));
     }
+
+    /// Compile-time assertion: `SendStream` implements `Send`.
+    /// If the `unsafe impl Send` is ever removed this test will fail to compile.
+    #[test]
+    fn test_send_stream_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<SendStream>();
+    }
+
+    /// Compile-time assertion: `SendStream` implements `Sync`.
+    #[test]
+    fn test_send_stream_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<SendStream>();
+    }
+
+    /// Verify that the `STREAM_HANDLE` static can be accessed from the test
+    /// thread (proving it satisfies `Send + Sync` requirements for statics).
+    #[test]
+    fn test_stream_handle_accessible() {
+        let guard = STREAM_HANDLE.lock().unwrap();
+        assert!(guard.is_none(), "STREAM_HANDLE should be None by default");
+    }
+
+    /// Verify STREAM_HANDLE can be accessed from a spawned thread,
+    /// proving the LazyLock<Mutex<Option<SendStream>>> is truly thread-safe.
+    #[test]
+    fn test_stream_handle_cross_thread_access() {
+        let handle = std::thread::spawn(|| {
+            let guard = STREAM_HANDLE.lock().unwrap();
+            guard.is_none()
+        });
+        assert!(handle.join().unwrap(), "STREAM_HANDLE should be None when accessed from another thread");
+    }
 }
