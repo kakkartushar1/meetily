@@ -41,6 +41,7 @@ export function isValidInlineContent(item: any): boolean {
 
 /**
  * Checks if a block is a valid BlockNote block object.
+ * Enhanced with stricter validation to prevent ProseMirror renderSpec errors.
  */
 export function isValidBlockNoteBlock(block: any): boolean {
   if (!block || typeof block !== 'object' || Array.isArray(block)) {
@@ -64,12 +65,20 @@ export function isValidBlockNoteBlock(block: any): boolean {
     }
   }
 
-  // Validate props
-  if (block.props !== undefined && (typeof block.props !== 'object' || Array.isArray(block.props))) {
-    return false;
+  // Validate props - ensure no arrays in props (common renderSpec error cause)
+  if (block.props !== undefined) {
+    if (typeof block.props !== 'object' || Array.isArray(block.props)) {
+      return false;
+    }
+    // Check each prop value to ensure no arrays are nested
+    for (const key in block.props) {
+      if (Array.isArray(block.props[key])) {
+        return false;
+      }
+    }
   }
 
-  // Validate children
+  // Validate children recursively
   if (block.children !== undefined) {
     if (!Array.isArray(block.children) || !block.children.every(isValidBlockNoteBlock)) {
       return false;
@@ -96,7 +105,7 @@ export function sanitizeInlineContent(item: any): any | null {
   } else if (item.type === 'link') {
     if (typeof item.href !== 'string' || !Array.isArray(item.content)) {
         // If link is malformed, try to convert it to plain text of its content
-        const textContent = Array.isArray(item.content) ? item.content.map(i => i.text).join('') : '';
+        const textContent = Array.isArray(item.content) ? item.content.map((i: any) => i.text).join('') : '';
         if (textContent) {
             return { type: 'text', text: textContent, styles: sanitized.styles };
         }
@@ -116,6 +125,7 @@ export function sanitizeInlineContent(item: any): any | null {
 
 /**
  * Sanitizes a single block, returning a valid block or null.
+ * Enhanced to handle arrays in props and other ProseMirror incompatibilities.
  */
 export function sanitizeBlock(block: any): any | null {
   if (!block || typeof block !== 'object' || Array.isArray(block)) return null;
@@ -124,36 +134,43 @@ export function sanitizeBlock(block: any): any | null {
   const sanitized: any = {
     id: block.id,
     type: block.type,
-    props: (block.props && typeof block.props === 'object' && !Array.isArray(block.props)) ? block.props : {},
+    props: {},
     content: [],
     children: [],
   };
 
+  // Sanitize props - remove any arrays to prevent renderSpec errors
+  if (block.props && typeof block.props === 'object' && !Array.isArray(block.props)) {
+    for (const key in block.props) {
+      const value = block.props[key];
+      // Skip arrays entirely (common renderSpec error cause)
+      if (!Array.isArray(value)) {
+        sanitized.props[key] = value;
+      }
+    }
+  }
+
   // Sanitize content
   if (block.type === 'table') {
     if (block.content && typeof block.content === 'object' && !Array.isArray(block.content)) {
-      // A simple copy is probably not enough, but for now, we preserve it as requested.
-      // A proper sanitizer would validate the TableContent structure.
+      // Preserve table content but validate it's an object
       sanitized.content = block.content;
     } else {
-      // Invalid table content, this was the root cause.
-      // Don't force to [], create a valid empty table structure.
-      sanitized.content = { type: 'tableContent', rows: [] };
+      // Invalid table content - create valid empty table structure
+      sanitized.content = { type: 'tableContent', columnWidths: [], rows: [] };
     }
   } else if (Array.isArray(block.content)) {
     sanitized.content = block.content.map(sanitizeInlineContent).filter(Boolean);
   }
-  // If content is something else, it will remain an empty array.
 
-  // Sanitize children
+  // Sanitize children recursively
   if (Array.isArray(block.children)) {
     sanitized.children = block.children.map(sanitizeBlock).filter(Boolean);
   }
 
   // Final validation check on the sanitized block
   if (!isValidBlockNoteBlock(sanitized)) {
-    // This shouldn't happen if sanitization is correct, but as a safeguard:
-    console.error("Failed to sanitize block, dropping:", block, "Resulted in:", sanitized);
+    console.warn("Failed to sanitize block, dropping:", block, "Resulted in:", sanitized);
     return null;
   }
 
@@ -169,4 +186,80 @@ export function sanitizeInitialContent(content: any[] | undefined): any[] | unde
   }
   const sanitized = content.map(sanitizeBlock).filter(Boolean);
   return sanitized.length > 0 ? sanitized : undefined;
+}
+
+/**
+ * Validates an array of BlockNote blocks.
+ * Checks ALL blocks to ensure none will cause renderSpec errors.
+ */
+export function isValidBlockNoteArray(arr: any[]): boolean {
+  if (!arr || arr.length === 0) return false;
+  // Check ALL blocks to ensure none will cause renderSpec errors
+  for (let i = 0; i < arr.length; i++) {
+    if (!isValidBlockNoteBlock(arr[i])) return false;
+  }
+  return true;
+}
+
+/**
+ * Sanitizes an array of BlockNote blocks.
+ * Maps over the array and sanitizes each block individually.
+ */
+export function sanitizeBlockNoteArray(arr: any[]): any[] {
+  if (!Array.isArray(arr)) return [];
+  const sanitized = arr.map(sanitizeBlock).filter(Boolean);
+  return sanitized;
+}
+
+type SummaryFormat = 'legacy' | 'markdown' | 'blocknote';
+
+/**
+ * Detects the format of summary data.
+ * Returns the format type and the normalized data object.
+ */
+export function detectSummaryFormat(data: any): { format: SummaryFormat; data: any } {
+  if (!data) {
+    return { format: 'legacy', data: null };
+  }
+
+  if (typeof data === 'string') {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      return { format: 'legacy', data: null };
+    }
+  }
+
+  if (typeof data !== 'object' || Array.isArray(data)) {
+    return { format: 'legacy', data: null };
+  }
+
+  // Priority 1: BlockNote format
+  if (data.summary_json && Array.isArray(data.summary_json)) {
+    if (isValidBlockNoteArray(data.summary_json)) {
+      return { format: 'blocknote', data };
+    }
+  }
+
+  // Priority 2: Markdown format
+  if (data.markdown && typeof data.markdown === 'string' && data.markdown.trim().length > 0) {
+    return { format: 'markdown', data };
+  }
+
+  // Priority 3: Legacy JSON
+  const hasLegacyStructure = Object.keys(data).some(key => {
+    if (key === 'MeetingName' || key === '_section_order' || key === 'markdown' || key === 'summary_json') return false;
+    const val = data[key];
+    return val && typeof val === 'object' && 'title' in val && 'blocks' in val;
+  });
+
+  if (hasLegacyStructure) {
+    return { format: 'legacy', data };
+  }
+
+  if (data.MeetingName) {
+    return { format: 'legacy', data: null };
+  }
+
+  return { format: 'legacy', data: null };
 }

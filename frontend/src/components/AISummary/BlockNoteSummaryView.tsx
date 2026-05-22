@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react';
+import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle, Component } from 'react';
 import dynamic from 'next/dynamic';
 import { Summary, SummaryDataResponse, BlockNoteBlock } from '@/types';
 import { AISummary } from './index';
