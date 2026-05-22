@@ -26,6 +26,13 @@ interface UseMicActivityMonitorReturn {
 }
 
 /**
+ * Frontend grace period (ms) after the hook mounts before it will accept
+ * meeting-detected events. This acts as a safety net on top of the Rust-side
+ * grace period to prevent false-positive toasts during app startup.
+ */
+const FRONTEND_GRACE_PERIOD_MS = 12_000;
+
+/**
  * Custom hook for microphone activity monitoring.
  *
  * Listens for `mic-activity-detected` and `mic-activity-stopped` events
@@ -33,14 +40,31 @@ interface UseMicActivityMonitorReturn {
  *
  * The hook also manages the user's enable/disable preference via the
  * Tauri store and provides a method to dismiss the current detection.
+ *
+ * A frontend grace period suppresses detection events for the first
+ * FRONTEND_GRACE_PERIOD_MS after mount to prevent false positives
+ * during app startup.
  */
 export function useMicActivityMonitor(): UseMicActivityMonitorReturn {
-  const [isMonitoring, setIsMonitoring] = useState(false);
+  const [isMonitoring, setIsMonitoring] = useState(true); // Default to true - enabled by default
   const [meetingDetected, setMeetingDetected] = useState(false);
-  const [preferenceEnabled, setPreferenceEnabled] = useState(false);
+  const [preferenceEnabled, setPreferenceEnabled] = useState(true); // Default to true - enabled by default
   const [deviceName, setDeviceName] = useState('');
   const unlistenDetectedRef = useRef<UnlistenFn | null>(null);
   const unlistenStoppedRef = useRef<UnlistenFn | null>(null);
+
+  // Track when the hook was first mounted so we can enforce a grace period
+  const mountTimeRef = useRef<number>(Date.now());
+  // Track whether the grace period has elapsed
+  const [graceElapsed, setGraceElapsed] = useState(false);
+
+  // Start a timer that flips graceElapsed once the grace period is over
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setGraceElapsed(true);
+    }, FRONTEND_GRACE_PERIOD_MS);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Load initial state
   useEffect(() => {
@@ -69,6 +93,17 @@ export function useMicActivityMonitor(): UseMicActivityMonitorReturn {
         'mic-activity-detected',
         (event) => {
           if (!mounted) return;
+
+          // Suppress detection events during the frontend grace period
+          // to prevent false-positive toasts on app startup.
+          const elapsed = Date.now() - mountTimeRef.current;
+          if (elapsed < FRONTEND_GRACE_PERIOD_MS) {
+            console.log(
+              `[MicActivityMonitor] Suppressing detection during grace period (${Math.round(elapsed / 1000)}s / ${FRONTEND_GRACE_PERIOD_MS / 1000}s)`
+            );
+            return;
+          }
+
           setMeetingDetected(true);
           setDeviceName(event.payload.device_name);
         }

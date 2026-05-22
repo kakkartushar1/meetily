@@ -73,11 +73,17 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   useEffect(() => {
     const checkTauri = async () => {
       try {
+        // Guard against Tauri not being available
+        if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+          console.warn('Tauri not available, skipping recording check');
+          return;
+        }
         const result = await invoke('is_recording');
         console.log('Tauri is initialized and ready, is_recording result:', result);
       } catch (error) {
         console.error('Tauri initialization error:', error);
-        alert('Failed to initialize recording. Please check the console for details.');
+        // Don't show alert during initialization - it may be a transient error
+        console.warn('Failed to initialize recording. This may resolve when the app fully loads.');
       }
     };
     checkTauri();

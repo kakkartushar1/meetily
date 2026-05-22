@@ -88,6 +88,11 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
     const setupRecordingListeners = async () => {
       try {
+        // Guard against Tauri not being available
+        if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+          console.warn('[TranscriptContext] Tauri not available, skipping recording listener setup');
+          return;
+        }
         // Initialize IndexedDB
         await indexedDBService.init();
 
@@ -284,6 +289,11 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
     const setupListener = async () => {
       try {
+        // Guard against Tauri not being available
+        if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+          console.warn('[TranscriptContext] Tauri not available, skipping transcript listener setup');
+          return;
+        }
         console.log('🔥 Setting up MAIN transcript listener during component initialization...');
         unlistenFn = await transcriptService.onTranscriptUpdate((update) => {
           const now = Date.now();

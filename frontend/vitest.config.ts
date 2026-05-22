@@ -14,7 +14,9 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
-  esbuild: {
-    include: /\.[jt]sx?$/,
+  oxc: {
+    jsx: {
+      runtime: 'automatic',
+    },
   },
 });

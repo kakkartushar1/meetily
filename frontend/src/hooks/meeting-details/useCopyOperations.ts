@@ -1,5 +1,5 @@
 import { useCallback, RefObject } from 'react';
-import { Transcript, Summary } from '@/types';
+import { Transcript, Summary, SummaryDataResponse } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
@@ -9,7 +9,7 @@ interface UseCopyOperationsProps {
   meeting: any;
   transcripts: Transcript[];
   meetingTitle: string;
-  aiSummary: Summary | null;
+  aiSummary: Summary | SummaryDataResponse | null;
   blockNoteSummaryRef: RefObject<BlockNoteSummaryViewRef>;
 }
 

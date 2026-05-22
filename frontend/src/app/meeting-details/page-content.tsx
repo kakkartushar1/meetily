@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Summary, SummaryResponse } from '@/types';
+import { Summary, SummaryResponse, SummaryDataResponse, BlockNoteBlock } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import Analytics from '@/lib/analytics';
 import { invoke } from '@tauri-apps/api/core';
@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
 import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
 import { ModelConfig } from '@/components/ModelSettingsModal';
+import { detectSummaryFormat, isValidBlockNoteArray, sanitizeBlockNoteArray } from '@/lib/blocknote-validation';
 
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
@@ -34,7 +35,7 @@ export default function PageContent({
   onLoadMore,
 }: {
   meeting: any;
-  summaryData: Summary | null;
+  summaryData: Summary | SummaryDataResponse | null;
   shouldAutoGenerate?: boolean;
   onAutoGenerateComplete?: () => void;
   onMeetingUpdated?: () => Promise<void>;
@@ -47,11 +48,42 @@ export default function PageContent({
   loadedCount?: number;
   onLoadMore?: () => void;
 }) {
+  // ─── Diagnostic logging (Task 1) ────────────────────────────────────────
+  // Log raw summaryData structure so we can confirm root cause in the console.
   console.log('📄 PAGE CONTENT: Initializing with data:', {
     meetingId: meeting.id,
     summaryDataKeys: summaryData ? Object.keys(summaryData) : null,
-    transcriptsCount: meeting.transcripts?.length
+    transcriptsCount: meeting.transcripts?.length,
   });
+
+  if (summaryData) {
+    const { format: detectedFormat, data: detectedData } = detectSummaryFormat(summaryData);
+    console.log('📄 PAGE CONTENT: Detected summary format =', detectedFormat);
+
+    if (detectedFormat === 'blocknote' && detectedData != null && Array.isArray(detectedData.summary_json)) {
+      const rawBlocks: BlockNoteBlock[] = detectedData.summary_json;
+      const rawBlockCount = rawBlocks.length;
+      const isValid = isValidBlockNoteArray(rawBlocks);
+      console.log(
+        '📄 PAGE CONTENT: summary_json isValidBlockNoteArray =',
+        isValid,
+        '| block count =',
+        rawBlockCount,
+      );
+
+      if (!isValid) {
+        const sanitized = sanitizeBlockNoteArray(rawBlocks);
+        console.warn(
+          '📄 PAGE CONTENT: summary_json had invalid blocks; sanitized count =',
+          sanitized.length,
+          '(dropped',
+          rawBlockCount - sanitized.length,
+          'blocks)',
+        );
+      }
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   // State
   const [customPrompt, setCustomPrompt] = useState<string>('');
@@ -144,14 +176,19 @@ export default function PageContent({
     let cancelled = false;
 
     const autoGenerate = async () => {
-      if (shouldAutoGenerate && meetingData.transcripts.length > 0 && !cancelled) {
-        console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
-        await summaryGeneration.handleGenerateSummary('');
+      try {
+        if (shouldAutoGenerate && meetingData.transcripts && meetingData.transcripts.length > 0 && !cancelled) {
+          console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
+          await summaryGeneration.handleGenerateSummary('');
 
-        // Notify parent that auto-generation is complete (only if not cancelled)
-        if (onAutoGenerateComplete && !cancelled) {
-          onAutoGenerateComplete();
+          // Notify parent that auto-generation is complete (only if not cancelled)
+          if (onAutoGenerateComplete && !cancelled) {
+            onAutoGenerateComplete();
+          }
         }
+      } catch (error) {
+        console.error('Auto-generate summary failed:', error);
+        // Don't crash the component - just log the error
       }
     };
 

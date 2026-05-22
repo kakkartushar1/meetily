@@ -4,7 +4,7 @@
 //! for consistency across the frontend API.
 
 use crate::nemo_engine::nemo_engine::NemoEngine;
-use log::{error, info, warn};
+use log::{error, info};
 use std::sync::{Arc, Mutex};
 use tauri::command;
 use tauri::{AppHandle, Emitter, Manager, Runtime};

@@ -76,7 +76,9 @@ async fn get_sidecar_manager() -> Result<Arc<SidecarManager>> {
 fn get_cached_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<PathBuf> {
     // Try read lock first (fast path for cache hits)
     {
-        let cache = MODEL_PATH_CACHE.read().unwrap();
+        let cache = MODEL_PATH_CACHE.read().map_err(|e| {
+            anyhow!("Failed to acquire read lock on model path cache: {}", e)
+        })?;
         if let Some(path) = cache.get(model_name) {
             // Verify file still exists before returning cached path
             if path.exists() {
@@ -86,7 +88,9 @@ fn get_cached_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<Pat
     }
 
     // Cache miss or file deleted - acquire write lock and update cache
-    let mut cache = MODEL_PATH_CACHE.write().unwrap();
+    let mut cache = MODEL_PATH_CACHE.write().map_err(|e| {
+        anyhow!("Failed to acquire write lock on model path cache: {}", e)
+    })?;
 
     // Double-check after acquiring write lock (another thread may have updated it)
     if let Some(path) = cache.get(model_name) {
@@ -161,11 +165,16 @@ pub async fn generate_with_builtin(
             let new_manager = SidecarManager::new(app_data_dir.clone())?;
             *global_manager = Some(Arc::new(new_manager));
         }
-        global_manager.clone().unwrap()
+        global_manager.clone().ok_or_else(|| {
+            anyhow!("Failed to initialize sidecar manager: manager is None after initialization")
+        })?
     };
 
     // Ensure sidecar is running with this model
-    manager.ensure_running(model_path.clone()).await?;
+    manager.ensure_running(model_path.clone()).await.map_err(|e| {
+        log::error!("Failed to start sidecar for model '{}': {}", model_name, e);
+        anyhow!("Failed to start built-in AI engine: {}. Please check that the model file exists and try again.", e)
+    })?;
 
     // Check cancellation after sidecar startup
     if let Some(token) = cancellation_token {
@@ -197,7 +206,21 @@ pub async fn generate_with_builtin(
     let response_json = if let Some(token) = cancellation_token {
         tokio::select! {
             result = manager.send_request(request_json, timeout) => {
-                result?
+                match result {
+                    Ok(json) => json,
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        log::error!("Sidecar request failed: {}", err_msg);
+                        // If the sidecar crashed, mark it unhealthy so it restarts next time
+                        if err_msg.contains("closed stdout") || err_msg.contains("crashed") || err_msg.contains("timed out") {
+                            log::warn!("Sidecar appears to have crashed, shutting down for clean restart");
+                            if let Err(shutdown_err) = manager.shutdown().await {
+                                log::error!("Failed to shutdown crashed sidecar: {}", shutdown_err);
+                            }
+                        }
+                        return Err(anyhow!("Built-in AI generation failed: {}. Please try again.", err_msg));
+                    }
+                }
             }
             _ = token.cancelled() => {
                 log::warn!("Generation cancelled by user, shutting down sidecar");
@@ -209,7 +232,20 @@ pub async fn generate_with_builtin(
             }
         }
     } else {
-        manager.send_request(request_json, timeout).await?
+        match manager.send_request(request_json, timeout).await {
+            Ok(json) => json,
+            Err(e) => {
+                let err_msg = e.to_string();
+                log::error!("Sidecar request failed: {}", err_msg);
+                if err_msg.contains("closed stdout") || err_msg.contains("crashed") || err_msg.contains("timed out") {
+                    log::warn!("Sidecar appears to have crashed, shutting down for clean restart");
+                    if let Err(shutdown_err) = manager.shutdown().await {
+                        log::error!("Failed to shutdown crashed sidecar: {}", shutdown_err);
+                    }
+                }
+                return Err(anyhow!("Built-in AI generation failed: {}. Please try again.", err_msg));
+            }
+        }
     };
 
     // Check cancellation before parsing response

@@ -1,7 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: false, // Disabled for BlockNote compatibility
-  output: 'export',
   images: {
     unoptimized: true,
   },

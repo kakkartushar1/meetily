@@ -17,15 +17,18 @@ import { OllamaDownloadProvider } from '@/contexts/OllamaDownloadContext'
 import { TranscriptProvider } from '@/contexts/TranscriptContext'
 import { ConfigProvider, useConfig } from '@/contexts/ConfigContext'
 import { OnboardingProvider } from '@/contexts/OnboardingContext'
-import { OnboardingFlow } from '@/components/onboarding'
 import { loadBetaFeatures } from '@/types/betaFeatures'
 import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
 import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
-import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
+import { ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 import { MeetingDetectedToast } from '@/components/MeetingDetectedToast'
+import dynamic from 'next/dynamic'
+
+const OnboardingFlow = dynamic(() => import('@/components/onboarding').then(mod => mod.OnboardingFlow), { ssr: false });
+const ImportAudioDialog = dynamic(() => import('@/components/ImportAudio').then(mod => mod.ImportAudioDialog), { ssr: false });
 
 
 const sourceSans3 = Source_Sans_3({
@@ -78,6 +81,14 @@ export default function RootLayout({
   const [importFilePath, setImportFilePath] = useState<string | null>(null)
 
   useEffect(() => {
+    // Guard against Tauri not being available (SSR or window destruction)
+    if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+      console.warn('[Layout] Tauri not available, defaulting to onboarding');
+      setShowOnboarding(true);
+      setOnboardingCompleted(false);
+      return;
+    }
+
     // Check onboarding status first
     invoke<{ completed: boolean } | null>('get_onboarding_status')
       .then((status) => {

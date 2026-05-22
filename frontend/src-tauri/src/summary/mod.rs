@@ -18,6 +18,9 @@ pub struct CustomOpenAIConfig {
     /// API key for authentication (optional if server doesn't require it)
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
+    /// Fallback API key (optional)
+    #[serde(rename = "fallbackApiKey")]
+    pub fallback_api_key: Option<String>,
     /// Model identifier to use (e.g., "gpt-4", "llama-3-70b", "mistral-7b")
     pub model: String,
     /// Maximum tokens for completion (optional)

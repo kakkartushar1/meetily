@@ -91,6 +91,7 @@ class SaveModelConfigRequest(BaseModel):
     model: str
     whisperModel: str
     apiKey: Optional[str] = None
+    fallbackApiKey: Optional[str] = None
 
 class SaveTranscriptConfigRequest(BaseModel):
     provider: str
@@ -555,6 +556,9 @@ async def get_model_config():
         api_key = await db.get_api_key(model_config["provider"])
         if api_key != None:
             model_config["apiKey"] = api_key
+        fallback_api_key = await db.get_fallback_api_key(model_config["provider"])
+        if fallback_api_key != None:
+            model_config["fallbackApiKey"] = fallback_api_key
     return model_config
 
 @app.post("/save-model-config")
@@ -563,6 +567,8 @@ async def save_model_config(request: SaveModelConfigRequest):
     await db.save_model_config(request.provider, request.model, request.whisperModel)
     if request.apiKey != None:
         await db.save_api_key(request.apiKey, request.provider)
+    if request.fallbackApiKey != None:
+        await db.save_fallback_api_key(request.fallbackApiKey, request.provider)
     return {"status": "success", "message": "Model configuration saved successfully"}  
 
 @app.get("/get-transcript-config")
@@ -586,10 +592,29 @@ async def save_transcript_config(request: SaveTranscriptConfigRequest):
 class GetApiKeyRequest(BaseModel):
     provider: str
 
+class SaveFallbackApiKeyRequest(BaseModel):
+    provider: str
+    fallbackApiKey: str
+
 @app.post("/get-api-key")
 async def get_api_key(request: GetApiKeyRequest):
     try:
         return await db.get_api_key(request.provider)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/get-fallback-api-key")
+async def get_fallback_api_key_endpoint(request: GetApiKeyRequest):
+    try:
+        return await db.get_fallback_api_key(request.provider)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/save-fallback-api-key")
+async def save_fallback_api_key_endpoint(request: SaveFallbackApiKeyRequest):
+    try:
+        await db.save_fallback_api_key(request.fallbackApiKey, request.provider)
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -619,6 +644,61 @@ async def save_meeting_summary(data: MeetingSummaryUpdate):
 
 class SearchRequest(BaseModel):
     query: str
+
+class ChatRequest(BaseModel):
+    meeting_id: str
+    query: str
+    history: Optional[List[dict]] = None
+
+@app.post("/chat")
+async def chat_with_meeting(request: ChatRequest):
+    """Chat with the meeting content using transcript and summary as context"""
+    try:
+        # Get meeting details (including title)
+        meeting = await db.get_meeting(request.meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        
+        # Get full transcript text
+        transcript_text = await db.get_full_transcript_text(request.meeting_id)
+        
+        # Get summary data
+        summary_result = await db.get_transcript_data(request.meeting_id)
+        summary_text = ""
+        if summary_result and summary_result.get("result"):
+            summary_text = summary_result["result"]
+
+        # Get current model config
+        model_config = await db.get_model_config()
+        if not model_config:
+            # Fallback to defaults if not configured
+            model_config = {"provider": "openai", "model": "gpt-4o"}
+        
+        # Combine context
+        context = f"Meeting Title: {meeting['title']}\n\n"
+        if summary_text:
+            context += f"AI Summary:\n{summary_text}\n\n"
+        context += f"Full Transcript:\n{transcript_text}"
+
+        # Truncate context if it's too long (simple character-based heuristic for now)
+        # Most models support at least 32k-128k tokens, so 100k characters is usually safe.
+        if len(context) > 150000:
+            context = context[:150000] + "... [Transcript truncated due to length]"
+
+        # Call chat logic
+        response = await processor.chat(
+            query=request.query,
+            context=context,
+            model=model_config["provider"],
+            model_name=model_config["model"],
+            history=request.history
+        )
+
+        return {"response": response}
+
+    except Exception as e:
+        logger.error(f"Error in chat_with_meeting: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/search-transcripts")
 async def search_transcripts(request: SearchRequest):

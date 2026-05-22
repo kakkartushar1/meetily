@@ -1174,6 +1174,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     state: tauri::State<'_, AppState>,
     endpoint: String,
     api_key: Option<String>,
+    fallback_api_key: Option<String>,
     model: String,
     max_tokens: Option<i32>,
     temperature: Option<f32>,
@@ -1218,6 +1219,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     let config = CustomOpenAIConfig {
         endpoint: endpoint.trim().to_string(),
         api_key: api_key.filter(|k| !k.trim().is_empty()),
+        fallback_api_key: fallback_api_key.filter(|k| !k.trim().is_empty()),
         model: model.trim().to_string(),
         max_tokens,
         temperature,
@@ -1264,6 +1266,63 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
         Err(e) => {
             log_error!("❌ Failed to get custom OpenAI config: {}", e);
             Err(format!("Failed to get custom OpenAI configuration: {}", e))
+        }
+    }
+}
+
+// ===== FALLBACK API KEY COMMANDS =====
+
+/// Saves a fallback API key for a given provider
+#[tauri::command]
+pub async fn api_save_fallback_api_key<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    fallback_api_key: String,
+) -> Result<serde_json::Value, String> {
+    log_info!(
+        "api_save_fallback_api_key called for provider '{}'",
+        &provider
+    );
+    let pool = state.db_manager.pool();
+
+    match SettingsRepository::save_fallback_api_key(pool, &provider, &fallback_api_key).await {
+        Ok(()) => {
+            log_info!("✅ Successfully saved fallback API key for provider: {}", &provider);
+            Ok(serde_json::json!({
+                "status": "success",
+                "message": format!("Fallback API key saved for {}", provider)
+            }))
+        }
+        Err(e) => {
+            log_error!("❌ Failed to save fallback API key for provider '{}': {}", &provider, e);
+            Err(format!("Failed to save fallback API key: {}", e))
+        }
+    }
+}
+
+/// Gets the fallback API key for a given provider
+#[tauri::command]
+pub async fn api_get_fallback_api_key<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    provider: String,
+) -> Result<String, String> {
+    log_info!(
+        "api_get_fallback_api_key called for provider '{}'",
+        &provider
+    );
+    match SettingsRepository::get_fallback_api_key(&state.db_manager.pool(), &provider).await {
+        Ok(key) => {
+            log_info!(
+                "Successfully retrieved fallback API key for provider '{}'.",
+                &provider
+            );
+            Ok(key.unwrap_or_default())
+        }
+        Err(e) => {
+            log_error!("Failed to get fallback API key for provider '{}': {}", &provider, e);
+            Err(e.to_string())
         }
     }
 }

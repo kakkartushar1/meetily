@@ -101,6 +101,48 @@ pub fn init_system_audio_state() -> SystemAudioDetectorState {
     Arc::new(Mutex::new(None))
 }
 
+/// Global singleton for auto-started system audio monitoring.
+/// This is separate from the Tauri-managed state so we can start monitoring
+/// during app setup (before Tauri State is accessible).
+static AUTO_DETECTOR: std::sync::LazyLock<Mutex<Option<SystemAudioDetector>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Start system audio monitoring from app startup code.
+/// Unlike the Tauri command variant, this does not require `State` and
+/// stores the detector in a module-level static.
+pub async fn start_system_audio_monitoring_internal<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let mut guard = AUTO_DETECTOR
+        .lock()
+        .map_err(|e| format!("Failed to lock auto-detector: {}", e))?;
+
+    if guard.is_some() {
+        log::info!("System audio monitoring is already running (auto-start)");
+        return Ok(());
+    }
+
+    let mut detector = SystemAudioDetector::new();
+
+    let callback = new_system_audio_callback(move |event| {
+        match event {
+            SystemAudioEvent::SystemAudioStarted(apps) => {
+                tracing::info!("[auto] System audio started by apps: {:?}", apps);
+                let _ = app_handle.emit("system-audio-started", apps);
+            }
+            SystemAudioEvent::SystemAudioStopped => {
+                let _ = app_handle.emit("system-audio-stopped", ());
+                tracing::info!("[auto] System audio stopped");
+            }
+        }
+    });
+
+    detector.start(callback);
+    *guard = Some(detector);
+    log::info!("System audio monitoring started successfully (auto-start)");
+    Ok(())
+}
+
 // Event payload types for frontend
 #[derive(serde::Serialize, Clone)]
 pub struct SystemAudioStartedPayload {

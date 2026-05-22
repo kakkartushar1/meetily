@@ -266,6 +266,89 @@ impl SettingsRepository {
         Ok(())
     }
 
+    // ===== FALLBACK API KEY METHODS =====
+
+    /// Saves a fallback API key for a given provider
+    ///
+    /// # Arguments
+    /// * `pool` - Database connection pool
+    /// * `provider` - The provider name (e.g., "openai", "claude", "groq", "openrouter", "gemini")
+    /// * `api_key` - The fallback API key to save
+    pub async fn save_fallback_api_key(
+        pool: &SqlitePool,
+        provider: &str,
+        api_key: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let api_key_column = match provider {
+            "openai" => "openaiFallbackApiKey",
+            "claude" => "anthropicFallbackApiKey",
+            "groq" => "groqFallbackApiKey",
+            "openrouter" => "openRouterFallbackApiKey",
+            "gemini" => "geminiFallbackApiKey",
+            "ollama" | "builtin-ai" | "custom-openai" => return Ok(()), // No fallback key needed
+            _ => {
+                return Err(sqlx::Error::Protocol(
+                    format!("Invalid provider for fallback key: {}", provider).into(),
+                ))
+            }
+        };
+
+        let query = format!(
+            r#"
+            INSERT INTO settings (id, provider, model, whisperModel, "{}")
+            VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', $1)
+            ON CONFLICT(id) DO UPDATE SET
+                "{}" = $1
+            "#,
+            api_key_column, api_key_column
+        );
+        sqlx::query(&query).bind(api_key).execute(pool).await?;
+
+        Ok(())
+    }
+
+    /// Gets the fallback API key for a given provider
+    ///
+    /// # Arguments
+    /// * `pool` - Database connection pool
+    /// * `provider` - The provider name (e.g., "openai", "claude", "groq", "openrouter", "gemini")
+    ///
+    /// # Returns
+    /// * `Ok(Some(String))` - Fallback API key found
+    /// * `Ok(None)` - No fallback key stored
+    /// * `Err(sqlx::Error)` - Database error
+    pub async fn get_fallback_api_key(
+        pool: &SqlitePool,
+        provider: &str,
+    ) -> std::result::Result<Option<String>, sqlx::Error> {
+        // Custom OpenAI fallback is stored in the JSON config's fallbackApiKey field
+        if provider == "custom-openai" {
+            let config = Self::get_custom_openai_config(pool).await?;
+            return Ok(config.and_then(|c| c.fallback_api_key));
+        }
+
+        let api_key_column = match provider {
+            "openai" => "openaiFallbackApiKey",
+            "claude" => "anthropicFallbackApiKey",
+            "groq" => "groqFallbackApiKey",
+            "openrouter" => "openRouterFallbackApiKey",
+            "gemini" => "geminiFallbackApiKey",
+            "ollama" | "builtin-ai" => return Ok(None), // No fallback key needed
+            _ => {
+                return Err(sqlx::Error::Protocol(
+                    format!("Invalid provider for fallback key: {}", provider).into(),
+                ))
+            }
+        };
+
+        let query = format!(
+            "SELECT {} FROM settings WHERE id = '1' LIMIT 1",
+            api_key_column
+        );
+        let api_key = sqlx::query_scalar(&query).fetch_optional(pool).await?;
+        Ok(api_key)
+    }
+
     // ===== CUSTOM OPENAI CONFIG METHODS =====
 
     /// Gets the custom OpenAI configuration from JSON

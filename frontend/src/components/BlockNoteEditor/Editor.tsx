@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PartialBlock, Block } from "@blocknote/core";
 import "@blocknote/shadcn/style.css";
 import "@blocknote/core/fonts/inter.css";
+import { useCreateBlockNote } from "@blocknote/react";
+import { BlockNoteView } from "@blocknote/shadcn";
+import { sanitizeInitialContent } from "../../lib/blocknote-validation";
+import EditorErrorBoundary from "./EditorErrorBoundary";
 
 interface EditorProps {
   initialContent?: Block[];
@@ -12,40 +16,43 @@ interface EditorProps {
 }
 
 export default function Editor({ initialContent, onChange, editable = true }: EditorProps) {
+  const [hasError, setHasError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string>('');
+
+  const safeInitialContent = useMemo(
+    () => sanitizeInitialContent(initialContent),
+    [initialContent]
+  );
+
   console.log('📝 EDITOR: Initializing BlockNote editor with blocks:', {
     hasContent: !!initialContent,
     blocksCount: initialContent?.length || 0,
+    sanitizedCount: safeInitialContent?.length || 0,
+    wasSanitized: !!initialContent && !safeInitialContent,
     editable
   });
 
-  // Lazy import to avoid SSR issues
-  const { useCreateBlockNote } = require("@blocknote/react");
-  const { BlockNoteView } = require("@blocknote/shadcn");
-
-  const editor = useCreateBlockNote({
-    initialContent: initialContent as PartialBlock[] | undefined,
-  });
-
-  console.log('📝 EDITOR: BlockNote editor created successfully');
-
-  // Expose blocksToMarkdown method
-  (editor as any).blocksToMarkdownLossy = async (blocks: Block[]) => {
-    try {
-      return await editor.blocksToMarkdownLossy(blocks);
-    } catch (error) {
-      console.error('❌ EDITOR: Failed to convert blocks to markdown:', error);
-      return '';
+  let editor: any = null;
+  try {
+    editor = useCreateBlockNote({
+      initialContent: safeInitialContent as PartialBlock[],
+    });
+  } catch (error) {
+    console.error('❌ EDITOR: Failed to create BlockNote editor:', error);
+    if (!hasError) {
+      setHasError(true);
+      setErrorMessage(error instanceof Error ? error.message : 'Unknown editor initialization error');
     }
-  };
+  }
 
-  // Handle content changes
+  if (editor) {
+    console.log('📝 EDITOR: BlockNote editor created successfully, document blocks:', editor.document?.length);
+  }
+
   useEffect(() => {
-    if (!onChange) return;
+    if (!onChange || !editor) return;
 
     const handleChange = () => {
-      console.log('📝 EDITOR: Content changed, notifying parent...', {
-        blocksCount: editor.document.length
-      });
       onChange(editor.document);
     };
 
@@ -53,11 +60,38 @@ export default function Editor({ initialContent, onChange, editable = true }: Ed
 
     return () => {
       if (typeof unsubscribe === 'function') {
-        console.log('📝 EDITOR: Cleaning up onChange listener');
         unsubscribe();
       }
     };
   }, [editor, onChange]);
 
-  return <BlockNoteView editor={editor} editable={editable} theme="light" />;
+  const handleRenderError = (error: Error) => {
+    console.error('❌ EDITOR: Render error caught:', error.message);
+    setHasError(true);
+    setErrorMessage(error.message);
+  };
+
+  if (hasError || !editor) {
+    return (
+      <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+        <p className="text-yellow-700 text-sm">
+          Unable to render summary in editor. The summary data format may be incompatible.
+        </p>
+        {errorMessage && (
+          <p className="text-yellow-600 text-xs mt-1 font-mono">
+            Error: {errorMessage}
+          </p>
+        )}
+        <p className="text-yellow-600 text-xs mt-1">
+          Try regenerating the summary to fix this issue.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <EditorErrorBoundary onError={handleRenderError}>
+      <BlockNoteView editor={editor} editable={editable} theme="light" />
+    </EditorErrorBoundary>
+  );
 }

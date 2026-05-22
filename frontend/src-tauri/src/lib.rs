@@ -60,9 +60,7 @@ pub mod transcription_catalog;
 pub mod utils;
 pub mod whisper_engine;
 
-// Explicitly import summary commands for Tauri v2 compatibility
-use crate::summary::*;
-use crate::summary::summary_engine::*;
+
 
 use audio::{list_audio_devices, AudioDevice, trigger_audio_permission};
 use log::{error as log_error, info as log_info};
@@ -507,6 +505,26 @@ pub fn run() {
                 log::warn!("Failed to resolve resource directory for templates");
             }
 
+            // CRITICAL: Disable Windows Communication Ducking BEFORE opening any audio streams.
+            // This prevents Windows from reducing other apps' volume by ~80% when Meetily
+            // opens WASAPI capture sessions (mic monitoring, recording, etc.).
+            // Must be called synchronously before any async audio tasks start.
+            #[cfg(target_os = "windows")]
+            {
+                log::info!("🔇 Configuring Windows audio session to prevent volume ducking...");
+                match audio::windows_audio_session::ducking::disable_communication_ducking() {
+                    Ok(()) => {
+                        log::info!("✅ Windows communication ducking disabled successfully");
+                        log::info!("   Other apps will maintain their volume while Meetily is running");
+                    }
+                    Err(e) => {
+                        log::warn!("⚠️ Failed to disable Windows communication ducking: {}", e);
+                        log::warn!("   Other apps may experience volume reduction while Meetily is running");
+                        log::warn!("   Users can manually fix this: Settings → System → Sound → Advanced");
+                    }
+                }
+            }
+
             // Initialize mic activity monitoring based on user preference
             let app_for_mic_monitor = _app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -518,6 +536,18 @@ pub fn run() {
                     }
                 } else {
                     log::info!("Mic activity monitoring is disabled by user preference, skipping");
+                }
+            });
+
+            // Initialize system audio monitoring on startup for meeting detection.
+            // On macOS this uses CoreAudio property listeners; on Windows it polls
+            // running processes to detect meeting apps (Teams, Zoom, etc.).
+            let app_for_system_audio = _app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use crate::audio::system_audio_commands::start_system_audio_monitoring_internal;
+                log::info!("Starting system audio monitoring on launch...");
+                if let Err(e) = start_system_audio_monitoring_internal(app_for_system_audio).await {
+                    log::error!("Failed to start system audio monitoring on launch: {}", e);
                 }
             });
 
@@ -671,6 +701,9 @@ pub fn run() {
             api::test_backend_connection,
             api::debug_backend_connection,
             api::open_external_url,
+            // Fallback API key commands
+            api::api_save_fallback_api_key,
+            api::api_get_fallback_api_key,
             // Custom OpenAI commands
             api::api_save_custom_openai_config,
             api::api_get_custom_openai_config,
@@ -680,6 +713,7 @@ pub fn run() {
             summary::commands::api_get_summary,
             summary::commands::api_save_meeting_summary,
             summary::commands::api_cancel_summary,
+            summary::commands::migrate_summaries,
             // Template commands
             summary::template_commands::api_list_templates,
             summary::template_commands::api_get_template_details,
@@ -774,6 +808,16 @@ pub fn run() {
         .run(|_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
                 log::info!("Application exiting, cleaning up resources...");
+
+                // Restore Windows audio ducking defaults on exit
+                // (Windows cleans up automatically, but this is good practice)
+                #[cfg(target_os = "windows")]
+                {
+                    if let Err(e) = audio::windows_audio_session::ducking::restore_communication_ducking() {
+                        log::warn!("Failed to restore Windows ducking on exit: {}", e);
+                    }
+                }
+
                 tauri::async_runtime::block_on(async {
                     // Clean up database connection and checkpoint WAL
                     if let Some(app_state) = _app_handle.try_state::<state::AppState>() {

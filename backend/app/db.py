@@ -138,7 +138,14 @@ class DatabaseManager:
                     groqApiKey TEXT,
                     openaiApiKey TEXT,
                     anthropicApiKey TEXT,
-                    ollamaApiKey TEXT
+                    ollamaApiKey TEXT,
+                    openRouterApiKey TEXT,
+                    geminiApiKey TEXT,
+                    openaiFallbackApiKey TEXT,
+                    anthropicFallbackApiKey TEXT,
+                    groqFallbackApiKey TEXT,
+                    openRouterFallbackApiKey TEXT,
+                    geminiFallbackApiKey TEXT
                 )
             """)
 
@@ -578,10 +585,9 @@ class DatabaseManager:
             logger.error(f"Database connection error in save_model_config: {str(e)}", exc_info=True)
             raise
 
-
     async def save_api_key(self, api_key: str, provider: str):
         """Save the API key"""
-        provider_list = ["openai", "claude", "groq", "ollama"]
+        provider_list = ["openai", "claude", "groq", "ollama", "openrouter", "gemini"]
         if provider not in provider_list:
             raise ValueError(f"Invalid provider: {provider}")
         if provider == "openai":
@@ -592,6 +598,10 @@ class DatabaseManager:
             api_key_name = "groqApiKey"
         elif provider == "ollama":
             api_key_name = "ollamaApiKey"
+        elif provider == "openrouter":
+            api_key_name = "openRouterApiKey"
+        elif provider == "gemini":
+            api_key_name = "geminiApiKey"
             
         try:
             async with self._get_connection() as conn:
@@ -626,7 +636,7 @@ class DatabaseManager:
 
     async def get_api_key(self, provider: str):
         """Get the API key"""
-        provider_list = ["openai", "claude", "groq", "ollama"]
+        provider_list = ["openai", "claude", "groq", "ollama", "openrouter", "gemini"]
         if provider not in provider_list:
             raise ValueError(f"Invalid provider: {provider}")
         if provider == "openai":
@@ -637,6 +647,81 @@ class DatabaseManager:
             api_key_name = "groqApiKey"
         elif provider == "ollama":
             api_key_name = "ollamaApiKey"
+        elif provider == "openrouter":
+            api_key_name = "openRouterApiKey"
+        elif provider == "gemini":
+            api_key_name = "geminiApiKey"
+        async with self._get_connection() as conn:
+            cursor = await conn.execute(f"SELECT {api_key_name} FROM settings WHERE id = '1'")
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else ""
+
+    async def save_fallback_api_key(self, api_key: str, provider: str):
+        """Save the fallback API key"""
+        provider_list = ["openai", "claude", "groq", "ollama", "openrouter", "gemini"]
+        if provider not in provider_list:
+            raise ValueError(f"Invalid provider: {provider}")
+        if provider == "openai":
+            api_key_name = "openaiFallbackApiKey"
+        elif provider == "claude":
+            api_key_name = "anthropicFallbackApiKey"
+        elif provider == "groq":
+            api_key_name = "groqFallbackApiKey"
+        elif provider == "ollama":
+            return # Ollama has no key
+        elif provider == "openrouter":
+            api_key_name = "openRouterFallbackApiKey"
+        elif provider == "gemini":
+            api_key_name = "geminiFallbackApiKey"
+            
+        try:
+            async with self._get_connection() as conn:
+                await conn.execute("BEGIN TRANSACTION")
+                
+                try:
+                    # Check if settings row exists
+                    cursor = await conn.execute("SELECT id FROM settings WHERE id = '1'")
+                    existing_config = await cursor.fetchone()
+                    
+                    if existing_config:
+                        # Update existing configuration
+                        await conn.execute(f"UPDATE settings SET {api_key_name} = ? WHERE id = '1'", (api_key,))
+                    else:
+                        # Insert new configuration with default values and the API key
+                        await conn.execute(f"""
+                            INSERT INTO settings (id, provider, model, whisperModel, {api_key_name})
+                            VALUES (?, ?, ?, ?, ?)
+                        """, ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', api_key))
+                        
+                    await conn.commit()
+                    logger.info(f"Successfully saved fallback API key for provider: {provider}")
+                    
+                except Exception as e:
+                    await conn.rollback()
+                    logger.error(f"Failed to save fallback API key for provider {provider}: {str(e)}", exc_info=True)
+                    raise
+                    
+        except Exception as e:
+            logger.error(f"Database connection error in save_fallback_api_key: {str(e)}", exc_info=True)
+            raise
+
+    async def get_fallback_api_key(self, provider: str):
+        """Get the fallback API key"""
+        provider_list = ["openai", "claude", "groq", "ollama", "openrouter", "gemini"]
+        if provider not in provider_list:
+            raise ValueError(f"Invalid provider: {provider}")
+        if provider == "openai":
+            api_key_name = "openaiFallbackApiKey"
+        elif provider == "claude":
+            api_key_name = "anthropicFallbackApiKey"
+        elif provider == "groq":
+            api_key_name = "groqFallbackApiKey"
+        elif provider == "ollama":
+            return ""
+        elif provider == "openrouter":
+            api_key_name = "openRouterFallbackApiKey"
+        elif provider == "gemini":
+            api_key_name = "geminiFallbackApiKey"
         async with self._get_connection() as conn:
             cursor = await conn.execute(f"SELECT {api_key_name} FROM settings WHERE id = '1'")
             row = await cursor.fetchone()
@@ -877,6 +962,22 @@ class DatabaseManager:
             await conn.execute(f"UPDATE settings SET {api_key_name} = NULL WHERE id = '1'")
             await conn.commit()
     
+    async def get_full_transcript_text(self, meeting_id: str) -> str:
+        """Get the full concatenated transcript text for a meeting"""
+        try:
+            async with self._get_connection() as conn:
+                cursor = await conn.execute("""
+                    SELECT transcript
+                    FROM transcripts
+                    WHERE meeting_id = ?
+                    ORDER BY timestamp ASC
+                """, (meeting_id,))
+                rows = await cursor.fetchall()
+                return " ".join([row[0] for row in rows])
+        except Exception as e:
+            logger.error(f"Error getting full transcript text: {str(e)}")
+            return ""
+
     async def update_meeting_summary(self, meeting_id: str, summary: dict):
         """Update a meeting's summary"""
         now = datetime.utcnow().isoformat()

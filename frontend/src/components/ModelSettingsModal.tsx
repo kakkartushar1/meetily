@@ -120,12 +120,20 @@ export function ModelSettingsModal({
   const setModelConfig = configContext?.setModelConfig || propsSetModelConfig;
   const providerApiKeys = configContext?.providerApiKeys;
   const updateProviderApiKey = configContext?.updateProviderApiKey;
+  const providerFallbackApiKeys = configContext?.providerFallbackApiKeys;
+  const updateProviderFallbackApiKey = configContext?.updateProviderFallbackApiKey;
 
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [error, setError] = useState<string>('');
   const [apiKey, setApiKey] = useState<string | null>(modelConfig.apiKey || null);
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(!!modelConfig.apiKey?.trim());
+
+  // Fallback API key state
+  const [fallbackApiKey, setFallbackApiKey] = useState<string | null>(null);
+  const [showFallbackApiKey, setShowFallbackApiKey] = useState<boolean>(false);
+  const [isFallbackApiKeyLocked, setIsFallbackApiKeyLocked] = useState<boolean>(false);
+  const [isFallbackLockButtonVibrating, setIsFallbackLockButtonVibrating] = useState<boolean>(false);
   const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
   const { serverAddress } = useSidebar();
   const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([]);
@@ -410,6 +418,17 @@ export function ModelSettingsModal({
     }
   }, [modelConfig.provider, providerApiKeys, requiresApiKey]);
 
+  // Sync local fallbackApiKey state when provider changes
+  useEffect(() => {
+    if (providerFallbackApiKeys && requiresApiKey && modelConfig.provider !== 'custom-openai') {
+      const correctKey = providerFallbackApiKeys[modelConfig.provider as keyof typeof providerFallbackApiKeys];
+      if (correctKey !== fallbackApiKey) {
+        setFallbackApiKey(correctKey || '');
+        setIsFallbackApiKeyLocked(!!correctKey?.trim());
+      }
+    }
+  }, [modelConfig.provider, providerFallbackApiKeys, requiresApiKey]);
+
   // Manual fetch function for Ollama models
   const fetchOllamaModels = async (silent = false) => {
     const trimmedEndpoint = ollamaEndpoint.trim();
@@ -661,6 +680,36 @@ export function ModelSettingsModal({
     // Update provider-specific key in context
     if (updateProviderApiKey && updatedConfig.apiKey && updatedConfig.provider !== 'custom-openai') {
       updateProviderApiKey(updatedConfig.provider, updatedConfig.apiKey);
+    }
+
+    // Save fallback API key if provided
+    if (requiresApiKey && fallbackApiKey?.trim()) {
+      try {
+        await invoke('api_save_fallback_api_key', {
+          provider: updatedConfig.provider,
+          fallbackApiKey: fallbackApiKey.trim(),
+        });
+        console.log('Fallback API key saved for provider:', updatedConfig.provider);
+        if (updateProviderFallbackApiKey) {
+          updateProviderFallbackApiKey(updatedConfig.provider, fallbackApiKey.trim());
+        }
+      } catch (err) {
+        console.error('Failed to save fallback API key:', err);
+        toast.error('Failed to save fallback API key');
+      }
+    } else if (requiresApiKey && !fallbackApiKey?.trim()) {
+      // Clear fallback key if it was emptied
+      try {
+        await invoke('api_save_fallback_api_key', {
+          provider: updatedConfig.provider,
+          fallbackApiKey: '',
+        });
+        if (updateProviderFallbackApiKey) {
+          updateProviderFallbackApiKey(updatedConfig.provider, null);
+        }
+      } catch (err) {
+        console.error('Failed to clear fallback API key:', err);
+      }
     }
 
     onSave(updatedConfig);
@@ -1106,6 +1155,63 @@ export function ModelSettingsModal({
                   onClick={() => setShowApiKey(!showApiKey)}
                 >
                   {showApiKey ? <EyeOff /> : <Eye />}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Fallback API Key (Optional) - shown when provider requires API key */}
+        {requiresApiKey && (
+          <div>
+            <Label>Fallback API Key (Optional)</Label>
+            <p className="text-xs text-muted-foreground mt-0.5 mb-1">
+              Used automatically if the primary key fails (rate limit, auth error, etc.)
+            </p>
+            <div className="relative mt-1">
+              <Input
+                type={showFallbackApiKey ? 'text' : 'password'}
+                value={fallbackApiKey || ''}
+                onChange={(e) => setFallbackApiKey(e.target.value)}
+                disabled={isFallbackApiKeyLocked}
+                placeholder="Enter fallback API key (optional)"
+                className="pr-24"
+                onClick={() => {
+                  if (isFallbackApiKeyLocked) {
+                    setIsFallbackLockButtonVibrating(true);
+                    setTimeout(() => setIsFallbackLockButtonVibrating(false), 500);
+                  }
+                }}
+              />
+              {isFallbackApiKeyLocked && fallbackApiKey?.trim() && (
+                <div
+                  onClick={() => {
+                    setIsFallbackLockButtonVibrating(true);
+                    setTimeout(() => setIsFallbackLockButtonVibrating(false), 500);
+                  }}
+                  className="absolute inset-0 flex items-center justify-center bg-muted/50 rounded-md cursor-not-allowed"
+                />
+              )}
+              <div className="absolute inset-y-0 right-0 pr-1 flex items-center space-x-1">
+                {fallbackApiKey?.trim() && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setIsFallbackApiKeyLocked(!isFallbackApiKeyLocked)}
+                    className={isFallbackLockButtonVibrating ? 'animate-vibrate text-red-500' : ''}
+                    title={isFallbackApiKeyLocked ? 'Unlock to edit' : 'Lock to prevent editing'}
+                  >
+                    {isFallbackApiKeyLocked ? <Lock /> : <Unlock />}
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setShowFallbackApiKey(!showFallbackApiKey)}
+                >
+                  {showFallbackApiKey ? <EyeOff /> : <Eye />}
                 </Button>
               </div>
             </div>

@@ -29,7 +29,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showRecordingNotification, setShowRecordingNotification] = useState(true);
-  const [micMonitoringEnabled, setMicMonitoringEnabled] = useState(false);
+  const [micMonitoringEnabled, setMicMonitoringEnabled] = useState(true); // Default to true - enabled by default
 
   // Load recording preferences on component mount
   useEffect(() => {

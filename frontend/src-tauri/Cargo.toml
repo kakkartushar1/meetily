@@ -1,6 +1,6 @@
 [package]
 name = "meetily"
-version = "0.3.0"
+version = "0.3.1"
 description = "A Tauri App for meeting minutes"
 authors = ["Sujith S"]
 license = "MIT"
@@ -100,6 +100,7 @@ nnnoiseless = "0.5"
 # NOTE: whisper-rs is declared in platform-specific sections below (macOS/Windows/Linux)
 # to ensure correct GPU features are enabled per platform
 futures-util = "0.3"
+futures = "0.3.31"
 silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", package = "silero" }
 
 # Parakeet (ONNX-based fast transcription) dependencies
@@ -181,6 +182,16 @@ whisper-rs = { version = "0.13.2", features = ["raw-api", "metal", "coreml"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 whisper-rs = { version = "0.13.2", features = ["raw-api"] }
 futures-channel = "0.3.31"
+
+# Windows COM API for audio session management (ducking prevention)
+# Required to call IAudioSessionControl2::SetDuckingPreference to prevent
+# Windows from reducing other apps' volume when Meetily opens audio streams.
+# Using 0.61 to match existing transitive dependency in Cargo.lock.
+windows = { version = "0.61", features = [
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_Foundation",
+] }
 
 # Linux-specific dependencies
 # Default: CPU-only build (no BLAS)

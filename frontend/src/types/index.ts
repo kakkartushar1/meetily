@@ -65,6 +65,22 @@ export interface SummaryResponse {
   };
 }
 
+// Chat types
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatRequest {
+  meeting_id: string;
+  query: string;
+  history?: ChatMessage[];
+}
+
+export interface ChatResponse {
+  response: string;
+}
+
 // BlockNote-specific types
 export type SummaryFormat = 'legacy' | 'markdown' | 'blocknote';
 

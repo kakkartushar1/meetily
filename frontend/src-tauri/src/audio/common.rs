@@ -1,6 +1,6 @@
 use crate::api::TranscriptSegment;
 use anyhow::Result;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -9,7 +9,7 @@ use uuid::Uuid;
 /// uses the same global engine instances.
 pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
     if crate::audio::recording_commands::is_recording().await {
-        log::info!("Skipping model unload after batch: recording in progress");
+        info!("Skipping model unload after batch: recording in progress");
         return;
     }
 
@@ -20,7 +20,8 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
             guard.as_ref().cloned()
         };
         if let Some(e) = engine {
-            e.unload_model().await;
+            // unload_model() returns bool, not Result
+            let _ = e.unload_model().await;
         }
 
         use crate::nemo_engine::commands::NEMO_ENGINE;
@@ -29,7 +30,9 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
             guard.as_ref().cloned()
         };
         if let Some(e) = nemo_engine {
-            e.unload_model().await;
+            if let Err(err) = e.unload_model().await {
+                warn!("Failed to unload NeMo model after batch: {}", err);
+            }
         }
     } else {
         use crate::whisper_engine::commands::WHISPER_ENGINE;
@@ -38,7 +41,8 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
             guard.as_ref().cloned()
         };
         if let Some(e) = engine {
-            e.unload_model().await;
+            // unload_model() returns bool, not Result
+            let _ = e.unload_model().await;
         }
     }
 }

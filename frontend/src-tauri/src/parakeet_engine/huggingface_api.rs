@@ -138,7 +138,7 @@ pub async fn list_model_files(repo_id: &str) -> Result<Vec<HuggingFaceFileEntry>
     // First get model info to check if it exists
     let response = client
         .get(&url)
-        .header("User-Agent", "Meetily/0.3.0")
+        .header("User-Agent", "Meetily/0.3.1")
         .send()
         .await
         .map_err(|e| anyhow!("Failed to fetch model info: {}", e))?;
@@ -158,7 +158,7 @@ pub async fn list_model_files(repo_id: &str) -> Result<Vec<HuggingFaceFileEntry>
 
     let tree_response = client
         .get(&tree_url)
-        .header("User-Agent", "Meetily/0.3.0")
+        .header("User-Agent", "Meetily/0.3.1")
         .send()
         .await
         .map_err(|e| anyhow!("Failed to fetch file tree: {}", e))?;
@@ -188,7 +188,7 @@ pub async fn get_model_info(repo_id: &str) -> Result<HuggingFaceModelInfo> {
 
     let response = client
         .get(&url)
-        .header("User-Agent", "Meetily/0.3.0")
+        .header("User-Agent", "Meetily/0.3.1")
         .send()
         .await
         .map_err(|e| anyhow!("Failed to fetch model info: {}", e))?;
@@ -328,7 +328,7 @@ pub async fn download_file(
     let mut downloaded_bytes: u64 = 0;
     let mut request = client
         .get(&download_url)
-        .header("User-Agent", "Meetily/0.3.0");
+        .header("User-Agent", "Meetily/0.3.1");
 
     if dest_path.exists() {
         let existing_size = fs::metadata(&dest_path).await

@@ -89,6 +89,24 @@ pub struct Setting {
     #[sqlx(rename = "openRouterApiKey")]
     #[serde(rename = "openRouterApiKey")]
     pub open_router_api_key: Option<String>,
+    #[sqlx(rename = "geminiApiKey")]
+    #[serde(rename = "geminiApiKey")]
+    pub gemini_api_key: Option<String>,
+    #[sqlx(rename = "openaiFallbackApiKey")]
+    #[serde(rename = "openaiFallbackApiKey")]
+    pub openai_fallback_api_key: Option<String>,
+    #[sqlx(rename = "anthropicFallbackApiKey")]
+    #[serde(rename = "anthropicFallbackApiKey")]
+    pub anthropic_fallback_api_key: Option<String>,
+    #[sqlx(rename = "groqFallbackApiKey")]
+    #[serde(rename = "groqFallbackApiKey")]
+    pub groq_fallback_api_key: Option<String>,
+    #[sqlx(rename = "openRouterFallbackApiKey")]
+    #[serde(rename = "openRouterFallbackApiKey")]
+    pub open_router_fallback_api_key: Option<String>,
+    #[sqlx(rename = "geminiFallbackApiKey")]
+    #[serde(rename = "geminiFallbackApiKey")]
+    pub gemini_fallback_api_key: Option<String>,
     #[sqlx(rename = "ollamaEndpoint")]
     #[serde(rename = "ollamaEndpoint")]
     pub ollama_endpoint: Option<String>,

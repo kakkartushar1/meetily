@@ -1,24 +1,28 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Transcript, Summary } from '@/types';
+import { Transcript, Summary, SummaryDataResponse } from '@/types';
 import { BlockNoteSummaryViewRef } from '@/components/AISummary/BlockNoteSummaryView';
 import { CurrentMeeting, useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 
+// Summary data can be either legacy Summary format or new SummaryDataResponse format
+type SummaryData = Summary | SummaryDataResponse | null;
+
 interface UseMeetingDataProps {
   meeting: any;
-  summaryData: Summary | null;
+  summaryData: SummaryData;
   onMeetingUpdated?: () => Promise<void>;
 }
 
 export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMeetingDataProps) {
   // State
   // Use prop directly since summary generation fetches transcripts independently
-  const transcripts = meeting.transcripts;
+  // Guard against undefined transcripts to prevent crashes
+  const transcripts = meeting.transcripts || [];
   const [meetingTitle, setMeetingTitle] = useState(meeting.title || '+ New Call');
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [isTitleDirty, setIsTitleDirty] = useState(false);
-  const [aiSummary, setAiSummary] = useState<Summary | null>(summaryData);
+  const [aiSummary, setAiSummary] = useState<SummaryData>(summaryData);
   const [isSaving, setIsSaving] = useState(false);
   const [, setIsSummaryDirty] = useState(false);
   const [, setError] = useState<string>('');

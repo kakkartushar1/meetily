@@ -296,7 +296,7 @@ impl SidecarManager {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit()) // Log stderr to main process
+            .stderr(Stdio::piped()) // Capture stderr instead of inheriting to prevent sidecar errors from affecting parent process
             .env("LLAMA_IDLE_TIMEOUT", self.idle_timeout_secs.to_string());
 
         #[cfg(target_os = "windows")]
@@ -313,6 +313,30 @@ impl SidecarManager {
 
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to get stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to get stdout"))?;
+
+        // Spawn a task to drain stderr so the sidecar doesn't block on full pipe buffer
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut stderr_reader = BufReader::new(stderr);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match stderr_reader.read_line(&mut line).await {
+                        Ok(0) => break, // EOF
+                        Ok(_) => {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                log::debug!("[llama-helper stderr] {}", trimmed);
+                            }
+                        }
+                        Err(e) => {
+                            log::debug!("Error reading llama-helper stderr: {}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         // Store handles
         {

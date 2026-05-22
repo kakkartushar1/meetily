@@ -1,7 +1,7 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-    "productName": "meetily",
-    "version": "0.3.0",
+"productName": "meetily",
+"version": "0.3.1",
     "identifier": "com.meetily.ai",
     "build": {
         "frontendDist": "../out",
@@ -60,6 +60,8 @@
                         "core:menu:default",
                         "core:tray:default",
                         "core:window:allow-set-title",
+                        "core:window:allow-set-always-on-top",
+                        "core:window:allow-set-focus",
                         "store:default",
                         "notification:default",
                         "notification:allow-is-permission-granted",
@@ -88,7 +90,7 @@
             "app",
             "dmg"
         ],
-        "createUpdaterArtifacts": true,
+        "createUpdaterArtifacts": false,
         "icon": [
             "icons/icon.png",
             "icons/app_icon.icns",

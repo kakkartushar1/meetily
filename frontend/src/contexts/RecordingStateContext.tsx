@@ -136,6 +136,11 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
 
     const setupListeners = async () => {
       try {
+        // Guard against Tauri not being available
+        if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+          console.warn('[RecordingStateContext] Tauri not available, skipping event listener setup');
+          return;
+        }
         // Recording started
         const unlistenStarted = await recordingService.onRecordingStarted(() => {
           console.log('[RecordingStateContext] Recording started event');
@@ -222,7 +227,12 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
    */
   useEffect(() => {
     console.log('[RecordingStateContext] Initial mount - syncing with backend');
-    syncWithBackend();
+    // Guard against Tauri not being available (SSR or window destruction)
+    if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__) {
+      syncWithBackend();
+    } else {
+      console.warn('[RecordingStateContext] Tauri not available, skipping initial sync');
+    }
   }, []);
 
   // NEW: Computed helpers from status

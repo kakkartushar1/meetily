@@ -2,7 +2,7 @@
 
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, Save, Loader2, Search, FolderOpen } from 'lucide-react';
+import { Copy, Save, Loader2, RefreshCw } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 
 interface SummaryUpdaterButtonGroupProps {
@@ -13,6 +13,8 @@ interface SummaryUpdaterButtonGroupProps {
   onFind?: () => void;
   onOpenFolder: () => Promise<void>;
   hasSummary: boolean;
+  onRegenerateSummary?: () => Promise<void>;
+  isRegenerating?: boolean;
 }
 
 export function SummaryUpdaterButtonGroup({
@@ -22,7 +24,9 @@ export function SummaryUpdaterButtonGroup({
   onCopy,
   onFind,
   onOpenFolder,
-  hasSummary
+  hasSummary,
+  onRegenerateSummary,
+  isRegenerating = false,
 }: SummaryUpdaterButtonGroupProps) {
   return (
     <ButtonGroup>
@@ -67,23 +71,33 @@ export function SummaryUpdaterButtonGroup({
         <span className="hidden lg:inline">Copy</span>
       </Button>
 
-      {/* Find button */}
-      {/* {onFind && (
+      {/* Regenerate Summary button */}
+      {onRegenerateSummary && (
         <Button
           variant="outline"
           size="sm"
-          title="Find in Summary"
+          title="Regenerate Summary"
           onClick={() => {
-            Analytics.trackButtonClick('find_in_summary', 'meeting_details');
-            onFind();
+            Analytics.trackButtonClick('regenerate_summary', 'meeting_details');
+            onRegenerateSummary();
           }}
-          disabled={!hasSummary}
-          className="cursor-pointer"
+          disabled={isRegenerating || !hasSummary}
+          className="cursor-pointer bg-gradient-to-r from-amber-50 to-orange-50 hover:from-amber-100 hover:to-orange-100 border-amber-200"
+          aria-label="Regenerate the meeting summary"
         >
-          <Search />
-          <span className="hidden lg:inline">Find</span>
+          {isRegenerating ? (
+            <>
+              <Loader2 className="animate-spin" />
+              <span className="hidden lg:inline">Regenerating...</span>
+            </>
+          ) : (
+            <>
+              <RefreshCw />
+              <span className="hidden lg:inline">Regenerate</span>
+            </>
+          )}
         </Button>
-      )} */}
+      )}
     </ButtonGroup>
   );
 }

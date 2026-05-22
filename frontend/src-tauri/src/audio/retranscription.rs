@@ -332,11 +332,6 @@ async fn run_retranscription<R: Runtime>(
         None
     };
     let nemo_engine = if use_nemo {
-        Some(get_or_init_nemo(&app, parakeet_target_model.as_deref()).await?)
-    } else {
-        None
-    };
-    let nemo_engine = if use_nemo {
         Some(get_or_init_nemo(&app, model.as_deref()).await?)
     } else {
         None

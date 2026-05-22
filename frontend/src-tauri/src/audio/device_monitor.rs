@@ -166,7 +166,10 @@ impl AudioDeviceMonitor {
         stop_signal: Arc<tokio::sync::Notify>,
     ) {
         let mut last_device_list = Vec::new();
-        let check_interval = Duration::from_secs(2); // Poll every 2 seconds
+        // OPTIMIZATION: Increased base polling interval from 2s to 10s to reduce
+        // WASAPI COM overhead. Frequent device enumeration via WASAPI COM can
+        // interfere with active audio sessions and contribute to volume ducking.
+        let mut current_interval = Duration::from_secs(10);
 
         loop {
             // Check for stop signal with timeout
@@ -175,7 +178,7 @@ impl AudioDeviceMonitor {
                     info!("Device monitor received stop signal");
                     break;
                 }
-                _ = tokio::time::sleep(check_interval) => {
+                _ = tokio::time::sleep(current_interval) => {
                     // Continue with monitoring check
                 }
             }
@@ -236,17 +239,20 @@ impl AudioDeviceMonitor {
                 }
             }
 
-            // Adjust check interval based on device states
-            // If any device is missing, check more frequently
+            // OPTIMIZATION: Adaptive polling interval to reduce WASAPI COM overhead.
+            // When all devices are present, poll infrequently (10s) to minimize
+            // COM calls that can interfere with active audio sessions.
+            // When a device is missing, poll faster (3s) for quicker reconnect detection.
             let has_missing = monitored_devices.iter().any(|d| d.consecutive_missing > 0);
             let next_interval = if has_missing {
-                Duration::from_secs(2) // Fast polling when device missing
+                Duration::from_secs(3) // Faster polling when device missing (was 2s)
             } else {
-                Duration::from_secs(5) // Slower polling when all devices present
+                Duration::from_secs(10) // Reduced polling when stable (was 5s)
             };
 
-            if next_interval != check_interval {
-                debug!("Adjusting monitor interval to {:?}", next_interval);
+            if next_interval != current_interval {
+                debug!("Adjusting monitor interval: {:?} → {:?}", current_interval, next_interval);
+                current_interval = next_interval;
             }
         }
     }

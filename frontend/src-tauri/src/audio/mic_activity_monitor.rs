@@ -2,6 +2,11 @@
 //!
 //! Maintains a rolling buffer of recent samples and emits activity events
 //! so the UI can show a "mic active" indicator.
+//!
+//! Also implements meeting detection: when sustained mic activity is detected
+//! for a configurable duration, it emits `mic-activity-detected` so the UI
+//! can prompt the user to start recording. When activity drops, it emits
+//! `mic-activity-stopped`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -10,6 +15,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamConfig};
 use log::{debug, error, info, warn};
 use tauri::{AppHandle, Emitter, Runtime};
+use tauri_plugin_store::StoreExt;
 use serde::Serialize;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -17,11 +23,43 @@ use serde::Serialize;
 /// Maximum buffer size: 1 second of audio at 48 kHz
 const MAX_BUFFER_SAMPLES: usize = 48_000;
 
-/// RMS threshold below which we consider the mic "silent"
-const SILENCE_THRESHOLD: f32 = 0.005;
+/// RMS threshold below which we consider the mic "silent".
+/// Raised from 0.005 to 0.02 to avoid false positives from ambient room noise
+/// and electrical noise on the microphone input.
+const SILENCE_THRESHOLD: f32 = 0.02;
 
 /// How often (ms) we emit activity updates to the frontend
 const EMIT_INTERVAL_MS: u64 = 150;
+
+/// Number of consecutive active checks needed to trigger meeting detection.
+/// At 150ms intervals, 60 checks ≈ 9 seconds of sustained mic activity.
+/// Increased from 20 (3s) to reduce false positives from brief ambient noise.
+const MEETING_DETECTION_THRESHOLD: u32 = 60;
+
+/// Number of consecutive silent checks needed to trigger meeting ended
+/// At 150ms intervals, 40 checks ≈ 6 seconds of sustained silence
+const MEETING_ENDED_THRESHOLD: u32 = 40;
+
+/// Cooldown period (ms) after dismissing detection before re-firing
+const DETECTION_COOLDOWN_MS: u64 = 60_000;
+
+/// Grace period (ms) after monitoring starts before detection can fire.
+/// This prevents false positives from mic initialization noise and
+/// ambient sound pickup during app startup.
+const STARTUP_GRACE_PERIOD_MS: u64 = 10_000;
+
+/// Delay (ms) before opening the WASAPI capture stream at app startup.
+/// This prevents the mic monitor from immediately opening a WASAPI session
+/// that could trigger Windows Communication Ducking before the ducking
+/// prevention code has had time to take effect.
+/// Also reduces resource contention during app initialization.
+const STARTUP_STREAM_DELAY_MS: u64 = 5_000;
+
+/// Store key for the mic monitoring preference
+const STORE_KEY_MIC_MONITORING: &str = "mic_activity_monitoring_enabled";
+
+/// Store file name for preferences
+const PREFERENCES_STORE: &str = "preferences.json";
 
 // ─── Activity payload ────────────────────────────────────────────────────────
 
@@ -30,6 +68,15 @@ pub struct MicActivityUpdate {
     pub is_active: bool,
     pub rms_level: f32,
     pub peak_level: f32,
+    pub timestamp: u64,
+}
+
+/// Payload emitted when a meeting is detected or stops.
+#[derive(Debug, Serialize, Clone)]
+pub struct MicActivityEvent {
+    pub detected: bool,
+    pub rms_level: f32,
+    pub device_name: String,
     pub timestamp: u64,
 }
 
@@ -53,6 +100,16 @@ unsafe impl Sync for SendStream {}
 
 static IS_MONITORING: AtomicBool = AtomicBool::new(false);
 
+/// Whether a meeting is currently detected (sustained mic activity).
+static MEETING_DETECTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether detection has been dismissed (cooldown active).
+static DETECTION_DISMISSED: AtomicBool = AtomicBool::new(false);
+
+/// Timestamp (ms) when detection was last dismissed.
+static DISMISS_TIMESTAMP: std::sync::LazyLock<std::sync::atomic::AtomicU64> =
+    std::sync::LazyLock::new(|| std::sync::atomic::AtomicU64::new(0));
+
 /// Holds the active cpal stream so we can stop it later.
 ///
 /// Using `Mutex<Option<SendStream>>` instead of
@@ -61,9 +118,17 @@ static IS_MONITORING: AtomicBool = AtomicBool::new(false);
 static STREAM_HANDLE: std::sync::LazyLock<Mutex<Option<SendStream>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
+/// Stores the device name being monitored for event payloads.
+static MONITORED_DEVICE_NAME: std::sync::LazyLock<Mutex<String>> =
+    std::sync::LazyLock::new(|| Mutex::new(String::new()));
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /// Start monitoring the default input device for microphone activity.
+///
+/// On Windows, this defers stream opening by `STARTUP_STREAM_DELAY_MS` to
+/// allow the ducking prevention code in `windows_audio_session` to take
+/// effect before any WASAPI capture sessions are opened.
 pub async fn start_mic_activity_monitoring<R: Runtime>(
     app_handle: AppHandle<R>,
     device_name: Option<String>,
@@ -73,6 +138,24 @@ pub async fn start_mic_activity_monitoring<R: Runtime>(
 
     info!("Starting mic activity monitoring (device: {:?})", device_name);
     IS_MONITORING.store(true, Ordering::SeqCst);
+
+    // OPTIMIZATION: On Windows, delay stream opening to allow ducking prevention
+    // to take effect. The windows_audio_session::ducking::disable_communication_ducking()
+    // call in lib.rs runs synchronously during setup, but the mic monitor is spawned
+    // asynchronously. This delay ensures the ducking opt-out is fully registered
+    // before we open a WASAPI capture session.
+    #[cfg(target_os = "windows")]
+    {
+        info!("Delaying mic activity stream by {}ms to allow ducking prevention to take effect",
+              STARTUP_STREAM_DELAY_MS);
+        tokio::time::sleep(tokio::time::Duration::from_millis(STARTUP_STREAM_DELAY_MS)).await;
+
+        // Check if monitoring was stopped during the delay
+        if !IS_MONITORING.load(Ordering::SeqCst) {
+            info!("Mic activity monitoring was stopped during startup delay, aborting");
+            return Ok(());
+        }
+    }
 
     let host = cpal::default_host();
 
@@ -86,6 +169,11 @@ pub async fn start_mic_activity_monitoring<R: Runtime>(
 
     let dev_name = device.name().unwrap_or_else(|_| "unknown".into());
     info!("Mic activity monitor using device: {}", dev_name);
+
+    // Store the device name for event payloads
+    if let Ok(mut name) = MONITORED_DEVICE_NAME.lock() {
+        *name = dev_name.clone();
+    }
 
     let config = device.default_input_config()?;
     let sample_rate = config.sample_rate().0;
@@ -169,11 +257,19 @@ pub async fn start_mic_activity_monitoring<R: Runtime>(
         *handle = Some(SendStream(stream));
     }
 
-    // Spawn the periodic emitter task
+    // Spawn the periodic emitter task with meeting detection logic
     let app = app_handle.clone();
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(tokio::time::Duration::from_millis(EMIT_INTERVAL_MS));
+
+        // Counters for meeting detection state machine
+        let mut consecutive_active: u32 = 0;
+        let mut consecutive_silent: u32 = 0;
+
+        // Record when monitoring started so we can enforce a grace period
+        // that suppresses detection during app startup / mic initialization.
+        let monitoring_started_at = now_millis();
 
         while IS_MONITORING.load(Ordering::SeqCst) {
             interval.tick().await;
@@ -186,8 +282,10 @@ pub async fn start_mic_activity_monitoring<R: Runtime>(
                 compute_levels(&guard)
             };
 
+            let is_active = rms > SILENCE_THRESHOLD;
+
             let update = MicActivityUpdate {
-                is_active: rms > SILENCE_THRESHOLD,
+                is_active,
                 rms_level: rms.min(1.0),
                 peak_level: peak.min(1.0),
                 timestamp: now_millis(),
@@ -197,8 +295,97 @@ pub async fn start_mic_activity_monitoring<R: Runtime>(
                 error!("Failed to emit mic-activity: {}", e);
                 break;
             }
+
+            // ── Startup grace period ──
+            // Skip meeting detection during the first STARTUP_GRACE_PERIOD_MS
+            // after monitoring starts. This prevents false positives caused by
+            // mic initialization noise and ambient sound pickup on app launch.
+            let elapsed_since_start = now_millis() - monitoring_started_at;
+            if elapsed_since_start < STARTUP_GRACE_PERIOD_MS {
+                // Reset counters during grace period so we don't accumulate
+                // stale "active" counts that fire immediately after grace ends.
+                consecutive_active = 0;
+                consecutive_silent = 0;
+                continue;
+            }
+
+            // ── Meeting detection state machine ──
+            let currently_detected = MEETING_DETECTED.load(Ordering::SeqCst);
+            let dismissed = DETECTION_DISMISSED.load(Ordering::SeqCst);
+
+            if is_active {
+                consecutive_active += 1;
+                consecutive_silent = 0;
+
+                // Check if we should fire meeting-detected
+                if !currently_detected
+                    && consecutive_active >= MEETING_DETECTION_THRESHOLD
+                {
+                    // Check cooldown
+                    let dismiss_time = DISMISS_TIMESTAMP.load(Ordering::SeqCst);
+                    let now = now_millis();
+                    let cooldown_expired = dismiss_time == 0
+                        || (now - dismiss_time) >= DETECTION_COOLDOWN_MS;
+
+                    if cooldown_expired && !dismissed {
+                        MEETING_DETECTED.store(true, Ordering::SeqCst);
+                        let device_name = MONITORED_DEVICE_NAME
+                            .lock()
+                            .map(|n| n.clone())
+                            .unwrap_or_default();
+
+                        let event = MicActivityEvent {
+                            detected: true,
+                            rms_level: rms.min(1.0),
+                            device_name,
+                            timestamp: now,
+                        };
+
+                        info!("Meeting detected — sustained mic activity for ~{}s",
+                            (consecutive_active as f32 * EMIT_INTERVAL_MS as f32 / 1000.0) as u32);
+
+                        if let Err(e) = app.emit("mic-activity-detected", &event) {
+                            error!("Failed to emit mic-activity-detected: {}", e);
+                        }
+                    }
+                }
+            } else {
+                consecutive_silent += 1;
+                consecutive_active = 0;
+
+                // Check if we should fire meeting-stopped
+                if currently_detected
+                    && consecutive_silent >= MEETING_ENDED_THRESHOLD
+                {
+                    MEETING_DETECTED.store(false, Ordering::SeqCst);
+                    // Reset dismissed flag so next meeting can be detected
+                    DETECTION_DISMISSED.store(false, Ordering::SeqCst);
+
+                    let device_name = MONITORED_DEVICE_NAME
+                        .lock()
+                        .map(|n| n.clone())
+                        .unwrap_or_default();
+
+                    let event = MicActivityEvent {
+                        detected: false,
+                        rms_level: rms.min(1.0),
+                        device_name,
+                        timestamp: now_millis(),
+                    };
+
+                    info!("Meeting ended — sustained silence for ~{}s",
+                        (consecutive_silent as f32 * EMIT_INTERVAL_MS as f32 / 1000.0) as u32);
+
+                    if let Err(e) = app.emit("mic-activity-stopped", &event) {
+                        error!("Failed to emit mic-activity-stopped: {}", e);
+                    }
+                }
+            }
         }
 
+        // Reset meeting detection state when monitoring stops
+        MEETING_DETECTED.store(false, Ordering::SeqCst);
+        DETECTION_DISMISSED.store(false, Ordering::SeqCst);
         info!("Mic activity emitter task ended");
     });
 
@@ -266,18 +453,46 @@ pub async fn get_mic_activity_monitoring_status() -> bool {
 }
 
 /// Get the user preference for mic-activity monitoring.
+/// Reads from the Tauri store; defaults to `true` (enabled by default).
 #[tauri::command]
-pub async fn get_mic_activity_monitoring_preference() -> Result<bool, String> {
-    // Default to false if no preference is stored
-    Ok(false)
+pub async fn get_mic_activity_monitoring_preference<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<bool, String> {
+    match app.store(PREFERENCES_STORE) {
+        Ok(store) => {
+            let enabled = store
+                .get(STORE_KEY_MIC_MONITORING)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true); // Default to true — enabled by default
+            Ok(enabled)
+        }
+        Err(e) => {
+            warn!("Failed to open preferences store: {}, defaulting to enabled", e);
+            Ok(true)
+        }
+    }
 }
 
 /// Set the user preference for mic-activity monitoring.
+/// Persists to the Tauri store and starts/stops monitoring accordingly.
 #[tauri::command]
 pub async fn set_mic_activity_monitoring_preference<R: Runtime>(
     app: AppHandle<R>,
     enabled: bool,
 ) -> Result<(), String> {
+    // Persist the preference to the store
+    match app.store(PREFERENCES_STORE) {
+        Ok(store) => {
+            store.set(STORE_KEY_MIC_MONITORING, serde_json::json!(enabled));
+            if let Err(e) = store.save() {
+                warn!("Failed to save preferences store: {}", e);
+            }
+        }
+        Err(e) => {
+            warn!("Failed to open preferences store for writing: {}", e);
+        }
+    }
+
     // Start or stop monitoring based on the new preference
     if enabled {
         if !is_mic_activity_monitoring() {
@@ -297,10 +512,13 @@ pub async fn set_mic_activity_monitoring_preference<R: Runtime>(
     Ok(())
 }
 
-/// Dismiss the current detection.
+/// Dismiss the current detection and start cooldown.
 #[tauri::command]
 pub async fn dismiss_mic_activity_detection() -> Result<(), String> {
     info!("Mic activity detection dismissed by user");
+    MEETING_DETECTED.store(false, Ordering::SeqCst);
+    DETECTION_DISMISSED.store(true, Ordering::SeqCst);
+    DISMISS_TIMESTAMP.store(now_millis(), Ordering::SeqCst);
     Ok(())
 }
 
@@ -308,11 +526,22 @@ pub async fn dismiss_mic_activity_detection() -> Result<(), String> {
 // CONVENIENCE FUNCTIONS (used by lib.rs during app startup)
 // ============================================================================
 
-/// Load the user's mic-activity monitoring preference.
-/// Returns `true` if monitoring should be enabled, `false` otherwise.
-pub async fn load_preference<R: Runtime>(_app: &AppHandle<R>) -> bool {
-    // Default to false — user must explicitly enable mic activity monitoring
-    false
+/// Load the user's mic-activity monitoring preference from the Tauri store.
+/// Returns `true` if monitoring should be enabled (default: true).
+pub async fn load_preference<R: Runtime>(app: &AppHandle<R>) -> bool {
+    match app.store(PREFERENCES_STORE) {
+        Ok(store) => {
+            let enabled = store
+                .get(STORE_KEY_MIC_MONITORING)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true); // Default to true — enabled by default
+            enabled
+        }
+        Err(e) => {
+            warn!("Failed to open preferences store for loading mic monitoring pref: {}, defaulting to enabled", e);
+            true
+        }
+    }
 }
 
 /// Start monitoring (convenience wrapper used by lib.rs startup code).

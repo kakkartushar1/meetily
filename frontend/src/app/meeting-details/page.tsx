@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
+import { isValidBlockNoteArray, sanitizeBlockNoteArray } from "@/lib/blocknote-validation";
 
 interface MeetingDetailsResponse {
   id: string;
@@ -51,6 +52,11 @@ function MeetingDetailsContent() {
   // Check if gemma3:1b model is available in Ollama
   const checkForGemmaModel = useCallback(async (): Promise<boolean> => {
     try {
+      // Guard against Tauri not being available (e.g., during SSR or window destruction)
+      if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+        console.warn('Tauri not available, skipping Ollama model check');
+        return false;
+      }
       const models = await invoke('get_ollama_models', { endpoint: null }) as any[];
       const hasGemma = models.some((m: any) => m.name === 'gemma3:1b');
       console.log('🔍 Checked for gemma3:1b:', hasGemma);
@@ -80,6 +86,13 @@ function MeetingDetailsContent() {
     }
 
     try {
+      // Guard against Tauri not being available
+      if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+        console.warn('Tauri not available, skipping auto-generation setup');
+        setHasCheckedAutoGen(true);
+        return;
+      }
+
       // Check what's currently in database
       const currentConfig = await invoke('api_get_model_config') as any;
 
@@ -223,28 +236,69 @@ function MeetingDetailsContent() {
           try {
             parsedData = JSON.parse(summaryData);
           } catch (e) {
+            console.warn('FETCH SUMMARY: Failed to parse string data, treating as empty');
             parsedData = {};
           }
         }
 
         console.log('🔍 FETCH SUMMARY: Parsed data:', parsedData);
+        console.log('🔍 FETCH SUMMARY: Parsed data keys:', Object.keys(parsedData));
 
-        // Priority 1: BlockNote JSON format
+        // Safety check: ensure parsedData is a valid object
+        if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
+          console.warn('FETCH SUMMARY: parsedData is not a valid object:', typeof parsedData);
+          setMeetingSummary(null);
+          return;
+        }
+
+        // Priority 1: BlockNote JSON format - ALWAYS sanitize before passing to UI
         if (parsedData.summary_json) {
+          if (Array.isArray(parsedData.summary_json) && parsedData.summary_json.length > 0) {
+            // ALWAYS sanitize, even if validation passes - catches edge cases
+            const sanitizedBlocks = sanitizeBlockNoteArray(parsedData.summary_json);
+
+            if (sanitizedBlocks.length > 0) {
+              console.log('FETCH SUMMARY: summary_json sanitized, blocks:', sanitizedBlocks.length);
+              setMeetingSummary({ ...parsedData, summary_json: sanitizedBlocks } as any);
+              return;
+            } else {
+              // All blocks invalid after sanitisation
+              console.warn('FETCH SUMMARY: All blocks invalid after sanitisation, stripping summary_json');
+              delete parsedData.summary_json;
+            }
+          } else {
+            console.warn('FETCH SUMMARY: summary_json is not a valid array, falling through');
+            delete parsedData.summary_json;
+          }
+        }
+
+        // Priority 2: Markdown format - pass through directly as SummaryDataResponse
+        if (parsedData.markdown && typeof parsedData.markdown === 'string' && parsedData.markdown.trim().length > 0) {
+          console.log('FETCH SUMMARY: Markdown format detected, length:', parsedData.markdown.length);
+          // Pass as SummaryDataResponse with markdown property
+          // BlockNoteSummaryView.detectSummaryFormat will handle this correctly
           setMeetingSummary(parsedData as any);
           return;
         }
 
-        // Priority 2: Markdown format
-        if (parsedData.markdown) {
-          setMeetingSummary(parsedData as any);
+        // Priority 3: Legacy JSON format - check if it has section structure
+        const { MeetingName, _section_order, markdown: _unusedMarkdown, ...restSummaryData } = parsedData;
+
+        // Check if there are any valid legacy sections
+        const hasLegacySections = Object.keys(restSummaryData).some(key => {
+          const section = restSummaryData[key];
+          return section && typeof section === 'object' && 'title' in section && 'blocks' in section;
+        });
+
+        if (!hasLegacySections) {
+          console.warn('FETCH SUMMARY: No valid legacy sections found in data, setting null');
+          // If we have markdown but it was empty, or no recognizable format at all
+          setMeetingSummary(null);
           return;
         }
 
         // Legacy format - apply formatting
         console.log('LEGACY FORMAT: Detected legacy format, applying section formatting');
-
-        const { MeetingName, _section_order, ...restSummaryData } = parsedData;
 
         // Format the summary data with consistent styling - PRESERVE ORDER
         const formattedSummary: Summary = {};
@@ -270,9 +324,8 @@ function MeetingDetailsContent() {
                   title: typedSection.title || key,
                   blocks: typedSection.blocks.map((block: any) => ({
                     ...block,
-                    // type: 'bullet',
-                    color: 'default',
-                    content: block?.content?.trim() || ''
+                    color: block?.color || 'default',
+                    content: typeof block?.content === 'string' ? block.content.trim() : ''
                   }))
                 };
               } else {
@@ -292,8 +345,15 @@ function MeetingDetailsContent() {
           }
         }
 
-        console.log('LEGACY FORMAT: Formatted summary:', formattedSummary);
-        setMeetingSummary(formattedSummary);
+        // Only set if we actually have content
+        const hasContent = Object.keys(formattedSummary).length > 0;
+        if (hasContent) {
+          console.log('LEGACY FORMAT: Formatted summary with', Object.keys(formattedSummary).length, 'sections');
+          setMeetingSummary(formattedSummary);
+        } else {
+          console.warn('LEGACY FORMAT: No valid sections after formatting, setting null');
+          setMeetingSummary(null);
+        }
       } catch (error) {
         console.error('FETCH SUMMARY: Error fetching meeting summary:', error);
         // Don't set error state for summary fetch failure, set to null to show generate button

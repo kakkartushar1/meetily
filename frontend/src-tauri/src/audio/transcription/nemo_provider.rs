@@ -5,7 +5,7 @@
 
 use super::provider::{TranscriptionError, TranscriptionProvider, TranscriptResult};
 use async_trait::async_trait;
-use log::{info, warn};
+use log::warn;
 use std::sync::Arc;
 
 /// NeMo transcription provider (wraps NemoEngine sidecar)

@@ -91,11 +91,15 @@ impl SummaryService {
         // Register cancellation token for this meeting
         let cancellation_token = Self::register_cancellation_token(&meeting_id);
 
-        // Parse provider
+        // Parse provider with detailed error message
         let provider = match LLMProvider::from_str(&model_provider) {
-            Ok(p) => p,
+            Ok(p) => {
+                info!("Using LLM provider: {:?}", p);
+                p
+            }
             Err(e) => {
-                Self::update_process_failed(&pool, &meeting_id, &e).await;
+                let err_msg = format!("Unsupported AI provider '{}': {}. Please check your model settings.", &model_provider, &e);
+                Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
                 return;
             }
         };
@@ -217,7 +221,19 @@ impl SummaryService {
         };
 
         // Get app data directory for BuiltInAI provider
-        let app_data_dir = _app.path().app_data_dir().ok();
+        let app_data_dir = match _app.path().app_data_dir() {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                if provider == LLMProvider::BuiltInAI {
+                    let err_msg = format!("Failed to resolve app data directory for built-in AI: {}", e);
+                    Self::update_process_failed(&pool, &meeting_id, &err_msg).await;
+                    Self::cleanup_cancellation_token(&meeting_id);
+                    return;
+                }
+                warn!("Could not resolve app data directory: {}, continuing without it", e);
+                None
+            }
+        };
 
         // Generate summary
         let client = reqwest::Client::new();

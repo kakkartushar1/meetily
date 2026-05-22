@@ -2,12 +2,21 @@
 
 import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react';
 import dynamic from 'next/dynamic';
-import { Summary, SummaryDataResponse, SummaryFormat, BlockNoteBlock } from '@/types';
+import { Summary, SummaryDataResponse, BlockNoteBlock } from '@/types';
 import { AISummary } from './index';
 import { Block } from '@blocknote/core';
 import { useCreateBlockNote } from '@blocknote/react';
 import { BlockNoteView } from '@blocknote/shadcn';
 import "@blocknote/shadcn/style.css";
+
+// Import unified validation utility
+import {
+  isValidInlineContent,
+  isValidBlockNoteBlock,
+  isValidBlockNoteArray,
+  sanitizeBlockNoteArray,
+  detectSummaryFormat,
+} from '@/lib/blocknote-validation';
 
 // Dynamically import BlockNote Editor to avoid SSR issues
 const Editor = dynamic(() => import('../BlockNoteEditor/Editor'), { ssr: false });
@@ -33,37 +42,6 @@ export interface BlockNoteSummaryViewRef {
   isDirty: boolean;
 }
 
-// Format detection helper
-function detectSummaryFormat(data: any): { format: SummaryFormat; data: any } {
-  if (!data) {
-    return { format: 'legacy', data: null };
-  }
-
-  // Priority 1: BlockNote format (has summary_json)
-  if (data.summary_json && Array.isArray(data.summary_json)) {
-    console.log('✅ FORMAT: BLOCKNOTE (summary_json exists)');
-    return { format: 'blocknote', data };
-  }
-
-  // Priority 2: Markdown format
-  if (data.markdown && typeof data.markdown === 'string') {
-    console.log('✅ FORMAT: MARKDOWN (will parse to BlockNote)');
-    return { format: 'markdown', data };
-  }
-
-  // Priority 3: Legacy JSON
-  const hasLegacyStructure = data.MeetingName || Object.keys(data).some(key =>
-    typeof data[key] === 'object' && data[key]?.title && data[key]?.blocks
-  );
-
-  if (hasLegacyStructure) {
-    console.log('✅ FORMAT: LEGACY (custom JSON)');
-    return { format: 'legacy', data };
-  }
-
-  return { format: 'legacy', data: null };
-}
-
 export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNoteSummaryViewProps>(({
   summaryData,
   onSave,
@@ -74,7 +52,41 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   meeting,
   onDirtyChange
 }, ref) => {
+  const [renderError, setRenderError] = useState<string | null>(null);
   const { format, data } = detectSummaryFormat(summaryData);
+
+  // ─── Diagnostic logging (Task 2) ────────────────────────────────────────
+  // These logs confirm the format detected and the validation results so we
+  // can identify missing `children` validation as the root cause.
+  console.log(
+    '🔍 BlockNoteSummaryView: detected format =', format,
+    '| summaryData type =', typeof summaryData,
+    '| keys =', summaryData ? Object.keys(summaryData) : 'null',
+  );
+
+  if (format === 'blocknote' && data?.summary_json) {
+    const rawBlocks = data.summary_json;
+    const validationResult = isValidBlockNoteArray(rawBlocks);
+    console.log(
+      '🔍 BlockNoteSummaryView: summary_json block count =', rawBlocks.length,
+      '| isValidBlockNoteArray (with children) =', validationResult,
+    );
+
+    // Log the first block in detail to surface any malformed children
+    if (rawBlocks.length > 0) {
+      console.log(
+        '🔍 BlockNoteSummaryView: first block sample =',
+        JSON.stringify(rawBlocks[0], null, 2),
+      );
+    }
+
+    if (!validationResult) {
+      console.warn(
+        '⚠️ BlockNoteSummaryView: summary_json FAILED validation – sanitiseBlockNoteArray will be applied before render.',
+      );
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
   const [isDirty, setIsDirty] = useState(false);
   const [currentBlocks, setCurrentBlocks] = useState<Block[]>([]);
   const [isSaving, setIsSaving] = useState(false);
@@ -88,10 +100,11 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   // Parse markdown to blocks when format is markdown
   useEffect(() => {
     if (format === 'markdown' && data?.markdown && editor) {
+      const markdownContent: string = data.markdown;
       const loadMarkdown = async () => {
         try {
           console.log('📝 Parsing markdown to BlockNote blocks...');
-          const blocks = await editor.tryParseMarkdownToBlocks(data.markdown);
+          const blocks = await editor.tryParseMarkdownToBlocks(markdownContent);
           editor.replaceBlocks(editor.document, blocks);
           console.log('✅ Markdown parsed successfully');
 
@@ -215,28 +228,112 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     );
   }
 
-  // Render BlockNote format (has summary_json)
-  if (format === 'blocknote') {
-    console.log('🎨 Rendering BLOCKNOTE format (direct)');
+  // Show render error fallback
+  if (renderError) {
+    console.error('🎨 BlockNoteSummaryView render error:', renderError);
     return (
-      <div className="flex flex-col w-full">
-        <div className="w-full">
-          <Editor
-            initialContent={data.summary_json}
-            onChange={(blocks) => {
-              console.log('📝 Editor blocks changed:', blocks.length);
-              handleEditorChange(blocks);
+      <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+        <p className="text-yellow-700 text-sm font-medium">Unable to display summary</p>
+        <p className="text-yellow-600 text-xs mt-1">{renderError}</p>
+        <p className="text-yellow-600 text-xs mt-1">Try regenerating the summary to fix this issue.</p>
+        {onRegenerateSummary && (
+          <button
+            onClick={() => {
+              setRenderError(null);
+              onRegenerateSummary();
             }}
-            editable={true}
-          />
-        </div>
+            className="mt-2 px-3 py-1 text-xs bg-yellow-100 hover:bg-yellow-200 text-yellow-800 rounded border border-yellow-300"
+          >
+            Regenerate Summary
+          </button>
+        )}
       </div>
     );
   }
 
+  // Render BlockNote format (has summary_json)
+  if (format === 'blocknote') {
+    console.log('🎨 Rendering BLOCKNOTE format (direct), blocks:', data?.summary_json?.length);
+    // Extra safety: validate summary_json one more time before passing to Editor
+    if (!data?.summary_json || !Array.isArray(data.summary_json) || data.summary_json.length === 0) {
+      console.error('❌ BLOCKNOTE format but summary_json is empty/invalid, falling back to legacy');
+      return (
+        <AISummary
+          summary={summaryData as Summary}
+          status={status}
+          error={error}
+          onSummaryChange={onSummaryChange || (() => { })}
+          onRegenerateSummary={onRegenerateSummary || (() => { })}
+          meeting={meeting}
+        />
+      );
+    }
+
+    // Sanitize the blocks to prevent ProseMirror renderSpec errors
+    // This handles cases where saved blocks have malformed inline content
+    const sanitizedBlocks = sanitizeBlockNoteArray(data.summary_json);
+    if (sanitizedBlocks.length === 0) {
+      console.error('❌ BLOCKNOTE format but all blocks were invalid after sanitization, falling back to markdown if available');
+      // Try to fall through to markdown rendering if markdown exists
+      if (data?.markdown && typeof data.markdown === 'string' && data.markdown.trim().length > 0) {
+        console.log('🔄 Falling back to markdown rendering');
+        // Don't return here - let it fall through to the markdown section below
+      } else {
+        return (
+          <AISummary
+            summary={summaryData as Summary}
+            status={status}
+            error={error}
+            onSummaryChange={onSummaryChange || (() => { })}
+            onRegenerateSummary={onRegenerateSummary || (() => { })}
+            meeting={meeting}
+          />
+        );
+      }
+    }
+
+    if (sanitizedBlocks.length > 0) {
+      if (sanitizedBlocks.length !== data.summary_json.length) {
+        console.warn(`⚠️ Sanitized ${data.summary_json.length - sanitizedBlocks.length} invalid blocks from summary_json`);
+      }
+      return (
+        <div className="flex flex-col w-full">
+          <div className="w-full">
+            <Editor
+              initialContent={sanitizedBlocks as unknown as Block[]}
+              onChange={(blocks) => {
+                console.log('📝 Editor blocks changed:', blocks.length);
+                handleEditorChange(blocks);
+              }}
+              editable={true}
+            />
+          </div>
+        </div>
+      );
+    }
+  }
+
   // Render Markdown format (parse and display in BlockNote)
   if (format === 'markdown') {
-    console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote)');
+    console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote), markdown length:', data?.markdown?.length);
+    // Safety: ensure we have valid markdown content
+    if (!data?.markdown || typeof data.markdown !== 'string' || data.markdown.trim().length === 0) {
+      console.error('❌ MARKDOWN format but markdown content is empty/invalid');
+      return (
+        <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <p className="text-yellow-700 text-sm font-medium">No summary content available</p>
+          <p className="text-yellow-600 text-xs mt-1">The summary appears to be empty. Try regenerating it.</p>
+          {onRegenerateSummary && (
+            <button
+              onClick={onRegenerateSummary}
+              className="mt-2 px-3 py-1 text-xs bg-yellow-100 hover:bg-yellow-200 text-yellow-800 rounded border border-yellow-300"
+            >
+              Regenerate Summary
+            </button>
+          )}
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col w-full">
         <div className="w-full">

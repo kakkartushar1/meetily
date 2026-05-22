@@ -113,7 +113,27 @@ pub fn get_default_model() -> ModelDef {
     get_available_models()
         .into_iter()
         .next()
-        .expect("At least one model must be defined")
+        .unwrap_or_else(|| {
+            log::error!("No built-in AI models defined! This is a build configuration error.");
+            // Return a safe fallback instead of panicking
+            ModelDef {
+                name: "gemma3:1b".to_string(),
+                display_name: "Gemma 3 1B (Fast)".to_string(),
+                gguf_file: "gemma-3-1b-it-Q8_0.gguf".to_string(),
+                template: "gemma3".to_string(),
+                download_url: "https://meetily.towardsgeneralintelligence.com/models/gemma-3-1b-it-Q8_0.gguf".to_string(),
+                size_mb: 1019,
+                context_size: 32768,
+                layer_count: 26,
+                sampling: SamplingParams {
+                    temperature: 1.0,
+                    top_k: 64,
+                    top_p: 0.95,
+                    stop_tokens: vec!["<end_of_turn>".to_string()],
+                },
+                description: "Fastest model. Runs on any hardware with ~1GB RAM.".to_string(),
+            }
+        })
 }
 
 /// Resolve model name to full file path in the models directory

@@ -77,7 +77,14 @@ class SchemaValidator:
                 ('groqApiKey', 'TEXT', ''),
                 ('openaiApiKey', 'TEXT', ''),
                 ('anthropicApiKey', 'TEXT', ''),
-                ('ollamaApiKey', 'TEXT', '')
+                ('ollamaApiKey', 'TEXT', ''),
+                ('openRouterApiKey', 'TEXT', ''),
+                ('geminiApiKey', 'TEXT', ''),
+                ('openaiFallbackApiKey', 'TEXT', ''),
+                ('anthropicFallbackApiKey', 'TEXT', ''),
+                ('groqFallbackApiKey', 'TEXT', ''),
+                ('openRouterFallbackApiKey', 'TEXT', ''),
+                ('geminiFallbackApiKey', 'TEXT', '')
             ],
             'transcript_settings': [
                 ('id', 'TEXT', 'PRIMARY KEY'),

@@ -85,6 +85,16 @@ interface ConfigContextType {
   };
   updateProviderApiKey: (provider: string, apiKey: string | null) => void;
 
+  // Provider-specific fallback API keys
+  providerFallbackApiKeys: {
+    claude: string | null;
+    groq: string | null;
+    openai: string | null;
+    openrouter: string | null;
+    gemini: string | null;
+  };
+  updateProviderFallbackApiKey: (provider: string, apiKey: string | null) => void;
+
   // Preference settings (lazy loaded)
   notificationSettings: NotificationSettings | null;
   storageLocations: StorageLocations | null;
@@ -124,6 +134,21 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     groq: null,
     openai: null,
     openrouter: null,
+  });
+
+  // Provider-specific fallback API keys (loaded once at startup)
+  const [providerFallbackApiKeys, setProviderFallbackApiKeys] = useState<{
+    claude: string | null;
+    groq: string | null;
+    openai: string | null;
+    openrouter: string | null;
+    gemini: string | null;
+  }>({
+    claude: null,
+    groq: null,
+    openai: null,
+    openrouter: null,
+    gemini: null,
   });
 
   // Ollama models list and error state
@@ -179,6 +204,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const loadModels = async () => {
       try {
+        // Guard against Tauri not being available
+        if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+          console.warn('[ConfigContext] Tauri not available, skipping Ollama model load');
+          return;
+        }
         const endpoint = modelConfig.ollamaEndpoint || null;
         const modelList = await invoke<OllamaModel[]>('get_ollama_models', { endpoint });
         setModels(modelList);
@@ -195,6 +225,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const loadTranscriptConfig = async () => {
       try {
+        // Guard against Tauri not being available
+        if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+          console.warn('[ConfigContext] Tauri not available, skipping transcript config load');
+          return;
+        }
         const config = await configService.getTranscriptConfig();
         if (config) {
           console.log('[ConfigContext] Loaded saved transcript config:', config);
@@ -214,6 +249,10 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   // Sync language preference to Rust on mount (fixes startup desync bug)
   useEffect(() => {
     if (selectedLanguage) {
+      // Guard against Tauri not being available
+      if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+        return;
+      }
       invoke('set_language_preference', { language: selectedLanguage })
         .then(() => {
           console.log('[ConfigContext] Synced language preference to Rust on startup:', selectedLanguage);
@@ -228,6 +267,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const fetchModelConfig = async () => {
       try {
+        // Guard against Tauri not being available
+        if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+          console.warn('[ConfigContext] Tauri not available, skipping model config load');
+          return;
+        }
         const data = await configService.getModelConfig();
         if (data && data.provider) {
           // If provider is custom-openai, fetch the additional config
@@ -295,6 +339,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const loadAllApiKeys = async () => {
       try {
+        // Guard against Tauri not being available
+        if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+          console.warn('[ConfigContext] Tauri not available, skipping API key load');
+          return;
+        }
         const providers = ['claude', 'groq', 'openai', 'openrouter'];
         const keys = await Promise.all(
           providers.map(p =>
@@ -310,6 +359,24 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
           openrouter: keys[3],
         });
         console.log('[ConfigContext] Loaded provider API keys');
+
+        // Also load fallback API keys concurrently
+        const fallbackProviders = ['claude', 'groq', 'openai', 'openrouter', 'gemini'];
+        const fallbackKeys = await Promise.all(
+          fallbackProviders.map(p =>
+            invoke<string>('api_get_fallback_api_key', { provider: p })
+              .catch(() => null) // Gracefully handle missing keys
+          )
+        );
+
+        setProviderFallbackApiKeys({
+          claude: fallbackKeys[0],
+          groq: fallbackKeys[1],
+          openai: fallbackKeys[2],
+          openrouter: fallbackKeys[3],
+          gemini: fallbackKeys[4],
+        });
+        console.log('[ConfigContext] Loaded provider fallback API keys');
       } catch (error) {
         console.error('[ConfigContext] Failed to load provider API keys:', error);
       }
@@ -321,6 +388,10 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   // Listen for model config updates from other components
   useEffect(() => {
     const setupListener = async () => {
+      // Guard against Tauri not being available
+      if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+        return;
+      }
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
         console.log('[ConfigContext] Received model-config-updated event:', event.payload);
@@ -346,6 +417,10 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const loadDevicePreferences = async () => {
       try {
+        // Guard against Tauri not being available
+        if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) {
+          return;
+        }
         const prefs = await configService.getRecordingPreferences();
         if (prefs && (prefs.preferred_mic_device || prefs.preferred_system_device)) {
           setSelectedDevices({
@@ -408,6 +483,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   // Update individual provider API key
   const updateProviderApiKey = useCallback((provider: string, apiKey: string | null) => {
     setProviderApiKeys(prev => ({ ...prev, [provider]: apiKey }));
+  }, []);
+
+  // Update individual provider fallback API key
+  const updateProviderFallbackApiKey = useCallback((provider: string, apiKey: string | null) => {
+    setProviderFallbackApiKeys(prev => ({ ...prev, [provider]: apiKey }));
   }, []);
 
   // Lazy load preference settings (only loads if not already cached)
@@ -489,6 +569,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     toggleIsAutoSummary,
     providerApiKeys,
     updateProviderApiKey,
+    providerFallbackApiKeys,
+    updateProviderFallbackApiKey,
     transcriptModelConfig,
     setTranscriptModelConfig,
     selectedDevices,
@@ -513,6 +595,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     toggleIsAutoSummary,
     providerApiKeys,
     updateProviderApiKey,
+    providerFallbackApiKeys,
+    updateProviderFallbackApiKey,
     transcriptModelConfig,
     selectedDevices,
     selectedLanguage,

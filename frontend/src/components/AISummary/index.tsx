@@ -613,6 +613,13 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
       </div>
       <p className="text-red-600 text-sm">{error}</p>
       <p className="text-red-500 text-xs mt-2">Please check your model configuration and API keys, or try again.</p>
+      <button
+        onClick={onRegenerateSummary}
+        className="mt-3 px-4 py-1.5 text-sm font-medium bg-red-100 hover:bg-red-200 text-red-700 rounded border border-red-300 transition-colors"
+        aria-label="Retry generating the summary"
+      >
+        ↻ Try Again
+      </button>
     </div>
   );
 
@@ -651,6 +658,13 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
       <div className="w-full p-4 bg-gray-50 border border-gray-200 rounded-lg text-center">
         <p className="text-gray-600">No summary content available.</p>
         <p className="text-gray-500 text-sm mt-1">Try generating a new summary.</p>
+        <button
+          onClick={onRegenerateSummary}
+          className="mt-3 px-4 py-1.5 text-sm font-medium bg-blue-100 hover:bg-blue-200 text-blue-700 rounded border border-blue-300 transition-colors"
+          aria-label="Regenerate the meeting summary"
+        >
+          ↻ Regenerate Summary
+        </button>
       </div>
     );
   }

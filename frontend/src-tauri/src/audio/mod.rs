@@ -36,6 +36,7 @@ pub mod system_audio_commands;
 pub mod device_monitor;  // NEW: Device disconnect/reconnect monitoring
 pub mod mic_activity_monitor; // NEW: Microphone activity detection for meeting auto-detection
 pub mod playback_monitor; // NEW: Playback device detection for BT warnings
+pub mod windows_audio_session; // Windows audio session management (ducking prevention)
 
 // Transcription module (provider abstraction, engine management, worker pool)
 pub mod transcription;

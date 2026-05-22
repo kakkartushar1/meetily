@@ -309,12 +309,23 @@ export function useRecordingStop(
 
           // Auto-navigate after a short delay with source parameter
           setTimeout(() => {
-            router.push(`/meeting-details?id=${meetingId}&source=recording`);
-            clearTranscripts()
-            Analytics.trackPageView('meeting_details');
+            try {
+              router.push(`/meeting-details?id=${meetingId}&source=recording`);
+              // Clear transcripts AFTER navigation has been initiated
+              // Use a small delay to ensure the meeting-details page has started loading
+              setTimeout(() => {
+                clearTranscripts();
+              }, 500);
+              Analytics.trackPageView('meeting_details');
 
-            // Reset to IDLE after navigation
-            setStatus(RecordingStatus.IDLE);
+              // Reset to IDLE after navigation completes
+              setTimeout(() => {
+                setStatus(RecordingStatus.IDLE);
+              }, 1000);
+            } catch (navError) {
+              console.error('Navigation error after recording stop:', navError);
+              setStatus(RecordingStatus.IDLE);
+            }
           }, 2000);
           // Track meeting completion analytics
           try {

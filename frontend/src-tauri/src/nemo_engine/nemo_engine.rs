@@ -7,7 +7,7 @@
 //! - Health checking and auto-restart
 
 use anyhow::{anyhow, Result};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -57,6 +57,7 @@ pub struct NemoModelInfo {
 
 /// Response from the sidecar /health endpoint.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields populated by serde deserialization
 struct HealthResponse {
     status: String,
     device: String,
@@ -65,6 +66,7 @@ struct HealthResponse {
 
 /// Response from the sidecar /models endpoint.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields populated by serde deserialization; struct reserved for model listing
 struct SidecarModelInfo {
     model_id: String,
     filename: String,
@@ -74,6 +76,7 @@ struct SidecarModelInfo {
 
 /// Response from the sidecar /download endpoint.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields populated by serde deserialization
 struct DownloadResponse {
     status: String,
     path: Option<String>,
@@ -82,6 +85,7 @@ struct DownloadResponse {
 
 /// Response from the sidecar /load endpoint.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields populated by serde deserialization
 struct LoadResponse {
     status: String,
     model_id: Option<String>,
@@ -96,6 +100,7 @@ struct TranscribeResponse {
 
 /// Response from the sidecar /unload endpoint.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields populated by serde deserialization
 struct UnloadResponse {
     status: String,
     model_id: Option<String>,
